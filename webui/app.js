@@ -132,10 +132,20 @@ function paint() {
   if (!off.width) return;
   const { vw, vh } = vp();
   if (cv.width !== vw || cv.height !== vh) { cv.width = vw; cv.height = vh; }
-  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, vw, vh);
+  // The letterbox area is GREY, so the screen's bounds are obvious against a
+  // black guest desktop (noVNC does the same). The screen itself gets a thin
+  // border and a drop shadow to read as a distinct surface.
+  ctx.fillStyle = '#4a4a4a'; ctx.fillRect(0, 0, vw, vh);
   const r = drawRect();
   ctx.imageSmoothingEnabled = true;
+  ctx.save();
+  ctx.shadowColor = '#000000aa'; ctx.shadowBlur = 12; ctx.shadowOffsetY = 2;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(r.left, r.top, r.width, r.height);
+  ctx.restore();
   ctx.drawImage(off, r.left, r.top, r.width, r.height);
+  ctx.strokeStyle = '#00000088'; ctx.lineWidth = 1;
+  ctx.strokeRect(r.left + 0.5, r.top + 0.5, r.width - 1, r.height - 1);
   $('zoomLabel').textContent = Math.round(S.userScale * 100) + '%';
 }
 function zoomTo(scale, cx, cy) {
