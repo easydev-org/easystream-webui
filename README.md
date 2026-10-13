@@ -1,59 +1,66 @@
 # easystream-webui
 
-A single-page browser UI for the **easystream (`est://`)** protocol: live H.264
-screen, pointer/keyboard input, and a11y queries, all over one page.
-
-`est://` is a raw-TCP binary protocol (see `abc-agent/worker-native/EST.md`), so
-a browser cannot open it directly. This repo ships two pieces:
+A browser UI for the **easystream (`est://`)** protocol: the live H.264 screen
+fills the page, with pointer/keyboard/touch input and a floating virtual
+keyboard. It talks **only** to the est stream — video out, input in; it never
+calls the a11y query endpoints.
 
 ```
 browser  ──WebSocket──▶  estbridge  ──TCP──▶  easystream daemon (est://48079)
- (index.html)            (Go, byte pipe)
+ (index.html + app.js)    (Go, byte pipe)
 ```
 
-- **`webui/index.html`** — the UI. It speaks the est framing over a WebSocket:
-  decodes the H.264 access units with **WebCodecs `VideoDecoder`** and paints a
-  canvas, sends pointer/keyboard frames, and shows `/apps`, `/tree`, `/find`.
-  No build step, no framework — one HTML file.
-- **`bridge/main.go`** — `estbridge`: a transparent WebSocket↔TCP byte pipe.
-  It opens one est connection per WebSocket and forwards bytes both ways, so
-  the page sees the exact est byte stream.
+## Features
 
-## Why a bridge
+- **noVNC-style display** — the video fills the viewport, letterboxed to keep
+  aspect; the latest frame is held offscreen so zoom/pan repaint instantly.
+- **Zoom & pan** — pinch-to-zoom and two-finger pan on touch; a `+ / − / Fit /
+  1:1` control; `Ctrl`/`Cmd`+wheel zooms on desktop. Zoom keeps the point under
+  the cursor/fingers fixed.
+- **Responsive** — a top bar that auto-hides (hot-zone at the top edge), safe-
+  area insets for notched phones, and a **bottom-sheet keyboard** on narrow
+  screens (a left drawer on wide ones) so the screen stays visible above it.
+- **Virtual keyboard (termux-like)** — modifiers (Ctrl/Alt/Shift/Meta, latched
+  with a visible indicator), editing keys, arrows, F1–F12, a full QWERTY
+  (digits/letters/symbols), and an IME/CJK text sink. Special keys are sent as
+  est `Key` frames; printable keys as `Text` (or `Key(char)` when a modifier is
+  latched, so combos like Ctrl+C work).
+- **Touch** — tap = left click, long-press = right click, drag = drag; a
+  two-finger gesture switches to pinch/pan and cancels the in-flight drag.
 
-Browsers have no raw-socket API. The bridge is deliberately dumb (no est
-parsing): it just relays bytes, so it stays correct as EST.md evolves. Run it
-next to the daemon.
+## Files
+
+```
+webui/index.html   the page (markup + styles)
+webui/app.js       the est client (framing, WebCodecs, input, view transform)
+bridge/main.go     estbridge: transparent WebSocket<->TCP byte pipe
+```
 
 ## Run
 
 ```sh
-# the daemon (worker-native) must be listening on 127.0.0.1:48079
+# the easystream daemon must be listening on 127.0.0.1:48079
 go run ./bridge -listen :8099 -est 127.0.0.1:48079 -web webui
 # open http://localhost:8099/
 ```
 
 ### WebCodecs needs a secure context
 
-`VideoDecoder` (WebCodecs) is only available in a **secure context** — HTTPS, or
-`http://localhost`. A page served from a plain-HTTP origin (e.g.
-`http://192.168.1.5:8099`) is NOT secure, so the browser hides WebCodecs and the
-screen stays black. Two options:
+`VideoDecoder` exists only in a **secure context** — HTTPS, or `http://localhost`.
+A plain-HTTP origin (e.g. `http://192.168.1.5:8099`) is not one, so the browser
+hides WebCodecs and the screen stays black. Either open the page via
+`http://localhost:8099/`, or serve over TLS:
 
-- open the page via `http://localhost:8099/` (same machine), or
-- serve over TLS:
-
-  ```sh
-  openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-    -keyout key.pem -out cert.pem -subj "/CN=easystream"
-  go run ./bridge -listen :8099 -est 127.0.0.1:48079 -web webui \
-    -tls-cert cert.pem -tls-key key.pem
-  # open https://<host>:8099/  (accept the self-signed certificate)
-  ```
-
-## Layout
-
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout key.pem -out cert.pem -subj "/CN=easystream"
+go run ./bridge -listen :8099 -est 127.0.0.1:48079 -web webui \
+  -tls-cert cert.pem -tls-key key.pem
+# open https://<host>:8099/  (accept the self-signed certificate)
 ```
-bridge/main.go     estbridge: WS <-> est TCP
-webui/index.html   the UI (video + input + a11y)
-```
+
+## Note on the Key frame
+
+The daemons read a `Key` frame as `u8 nameLen, name[nameLen], u32 char, u8
+down`; `EST.md` documents it without the `char` field. This client matches the
+**daemons** (the extra `u32 char` is required, in little-endian).

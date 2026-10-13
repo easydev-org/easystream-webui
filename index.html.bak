@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <title>easystream</title>
+    <style>
+      :root { --bar: #101010cc; --fg: #eee; --bd: #333; --acc: #fab283; --ok: #4ade80; --err: #f87171; }
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #000; color: var(--fg);
+        font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; }
+
+      /* The screen fills the page; the canvas is letterboxed to keep aspect. */
+      #screen { position: fixed; inset: 0; width: 100%; height: 100%; cursor: none;
+        touch-action: none; outline: none; display: block; }
+
+      /* Floating top bar — auto-hides, shown on hover/tap at the top edge. */
+      #bar {
+        position: fixed; top: 0; left: 0; right: 0; height: 40px; z-index: 30;
+        display: flex; align-items: center; gap: 8px; padding: 0 10px;
+        background: var(--bar); backdrop-filter: blur(6px);
+        border-bottom: 1px solid var(--bd);
+        transform: translateY(-100%); transition: transform .15s ease;
+      }
+      #bar.show { transform: none; }
+      #bar .grow { flex: 1; }
+      #bar b { letter-spacing: .3px; }
+      .badge { border-radius: 4px; padding: 1px 6px; font-size: 11px; }
+      .badge.live { background: #4ade8033; color: var(--ok); }
+      .badge.err { background: #f8717133; color: var(--err); }
+      .badge.wait { background: #8884; color: #aaa; }
+      .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+      .micro { font-size: 11px; color: #aaa; }
+      button {
+        background: #ffffff12; color: var(--fg); border: 1px solid var(--bd);
+        border-radius: 6px; padding: 4px 10px; font: inherit; cursor: pointer;
+      }
+      button:hover { background: #ffffff22; }
+      button.on { background: var(--acc); color: #000; border-color: var(--acc); }
+
+      /* A thin hot-zone at the top edge reveals the bar (like noVNC). */
+      #hotzone { position: fixed; top: 0; left: 0; right: 0; height: 6px; z-index: 31; }
+
+      /* ── floating virtual keyboard (left drawer) ─────────────────────────── */
+      #kbdToggle {
+        position: fixed; left: 12px; bottom: 12px; z-index: 25;
+        background: var(--bar); border: 1px solid var(--bd); border-radius: 10px;
+        padding: 8px 12px; backdrop-filter: blur(6px);
+      }
+      #kbd {
+        position: fixed; left: 0; top: 0; bottom: 0; width: 340px; z-index: 26;
+        background: var(--bar); backdrop-filter: blur(10px);
+        border-right: 1px solid var(--bd); padding: 10px; overflow-y: auto;
+        transform: translateX(-100%); transition: transform .18s ease;
+        display: flex; flex-direction: column; gap: 8px;
+      }
+      #kbd.show { transform: none; }
+      #kbd .row { display: flex; gap: 5px; }
+      #kbd .key {
+        flex: 1 1 0; min-width: 0; padding: 12px 0; text-align: center;
+        border: 1px solid var(--bd); border-radius: 7px; background: #ffffff10;
+        user-select: none; cursor: pointer; font-size: 14px;
+      }
+      #kbd .key:active { background: var(--acc); color: #000; }
+      #kbd .key.mod.on { background: var(--acc); color: #000; }
+      #kbd .key.wide { flex: 1.6 1 0; }
+      #kbd .key.space { flex: 5 1 0; }
+      #kbd h4 { margin: 4px 0 0; font-weight: 600; font-size: 12px; color: #bbb; }
+      #kbd .hint { font-size: 11px; color: #999; }
+
+      /* soft-keyboard sink for IME / CJK */
+      #ime { position: fixed; left: -9999px; top: 0; width: 10px; height: 10px; opacity: 0; }
+    </style>
+  </head>
+  <body>
+    <canvas id="screen" tabindex="0"></canvas>
+
+    <div id="hotzone"></div>
+    <div id="bar">
+      <b>easystream</b>
+      <span class="badge wait" id="state">connecting</span>
+      <span class="micro mono" id="stats">—</span>
+      <span class="grow"></span>
+      <button id="btnKbd">⌨ Keys</button>
+      <button id="btnCtrls">Ctrl/Alt</button>
+      <button id="btnFs">⛶ Fullscreen</button>
+      <button id="btnRetry">Retry</button>
+    </div>
+
+    <button id="kbdToggle" title="show keyboard">⌨</button>
+
+    <!-- floating virtual keyboard: modifiers, function keys, arrows, and a
+         text sink for IME/CJK. It only ever sends est input frames. -->
+    <div id="kbd">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <b>Keyboard</b>
+        <button id="kbdHide" style="padding:2px 8px">✕</button>
+      </div>
+      <div class="hint">Tap a key to send it. Modifiers latch for the next key.</div>
+
+      <h4>Modifiers</h4>
+      <div class="row" id="mods">
+        <div class="key mod" data-mod="Control">Ctrl</div>
+        <div class="key mod" data-mod="Alt">Alt</div>
+        <div class="key mod" data-mod="Shift">Shift</div>
+        <div class="key mod" data-mod="Meta">Meta</div>
+      </div>
+
+      <h4>Editing</h4>
+      <div class="row">
+        <div class="key" data-key="Escape">Esc</div>
+        <div class="key" data-key="Tab">Tab</div>
+        <div class="key" data-key="Backspace">⌫</div>
+        <div class="key" data-key="Delete">Del</div>
+        <div class="key" data-key="Return">⏎</div>
+      </div>
+
+      <h4>Arrows</h4>
+      <div class="row">
+        <div class="key" data-key="Home">Home</div>
+        <div class="key" data-key="Up">↑</div>
+        <div class="key" data-key="End">End</div>
+      </div>
+      <div class="row">
+        <div class="key" data-key="Left">←</div>
+        <div class="key" data-key="Down">↓</div>
+        <div class="key" data-key="Right">→</div>
+      </div>
+      <div class="row">
+        <div class="key" data-key="PageUp">PgUp</div>
+        <div class="key" data-key="PageDown">PgDn</div>
+        <div class="key" data-key="Insert">Ins</div>
+      </div>
+
+      <h4>Function</h4>
+      <div class="row">
+        <div class="key" data-key="F1">F1</div><div class="key" data-key="F2">F2</div>
+        <div class="key" data-key="F3">F3</div><div class="key" data-key="F4">F4</div>
+      </div>
+      <div class="row">
+        <div class="key" data-key="F5">F5</div><div class="key" data-key="F6">F6</div>
+        <div class="key" data-key="F7">F7</div><div class="key" data-key="F8">F8</div>
+      </div>
+      <div class="row">
+        <div class="key" data-key="F9">F9</div><div class="key" data-key="F10">F10</div>
+        <div class="key" data-key="F11">F11</div><div class="key" data-key="F12">F12</div>
+      </div>
+
+      <h4>Text (IME / CJK)</h4>
+      <input id="ime" autocomplete="off" autocapitalize="off" spellcheck="false" />
+      <div class="hint">Focus here and type; each committed run is sent as text.</div>
+    </div>
+
+    <script>
+      // ── est:// frames (EST.md; the Key/Text layouts match the daemons) ─────
+      const T = { HELLO: 0x01, VIDEO: 0x02,
+        MOVE: 0x10, BUTTON: 0x11, SCROLL: 0x12, KEY: 0x13, TEXT: 0x14,
+        PING: 0x50, PONG: 0x51 };
+
+      const $ = (id) => document.getElementById(id);
+      const cv = $('screen');
+      const ctx = cv.getContext('2d');
+      const kbd = $('kbd');
+      const bar = $('bar');
+      const S = { ws: null, dec: null, codec: 'avc1.42E01F', w: 0, h: 0, gotKey: false,
+        fps: 0, frames: 0, t0: performance.now() };
+
+      // ── framing ────────────────────────────────────────────────────────────
+      function frame(type, body) {
+        const b = body || new Uint8Array(0);
+        const out = new Uint8Array(6 + b.length);
+        out[0] = type;
+        new DataView(out.buffer).setUint32(2, b.length, false);
+        out.set(b, 6);
+        return out;
+      }
+      const dv = (n) => new DataView(new Uint8Array(n).buffer);
+      function send(bytes) { if (S.ws && S.ws.readyState === WebSocket.OPEN) S.ws.send(bytes); }
+      function sendMove(x, y) { const b = new Uint8Array(4); const d = new DataView(b.buffer);
+        d.setUint16(0, x, false); d.setUint16(2, y, false); send(frame(T.MOVE, b)); }
+      function sendButton(btn, down) { send(frame(T.BUTTON, new Uint8Array([btn, down ? 1 : 0]))); }
+      // Key: nameLen, name, u32 char, u8 down  (matches the daemons, not EST.md)
+      function sendKey(name, ch, down) {
+        const nb = new TextEncoder().encode(name || '');
+        const b = new Uint8Array(1 + nb.length + 4 + 1);
+        b[0] = nb.length; b.set(nb, 1);
+        new DataView(b.buffer).setUint32(1 + nb.length, ch >>> 0, true);
+        b[1 + nb.length + 4] = down ? 1 : 0;
+        send(frame(T.KEY, b));
+      }
+      function sendText(s) { send(frame(T.TEXT, new TextEncoder().encode(s))); }
+      function tapKey(name) { sendKey(name, 0, true); sendKey(name, 0, false); }
+
+      // ── inbound ────────────────────────────────────────────────────────────
+      let rx = new Uint8Array(0);
+      function onBytes(chunk) {
+        if (rx.length) { const m = new Uint8Array(rx.length + chunk.length); m.set(rx); m.set(chunk, rx.length); rx = m; }
+        else rx = chunk;
+        for (;;) {
+          if (rx.length < 6) return;
+          const type = rx[0];
+          const len = new DataView(rx.buffer, rx.byteOffset).getUint32(2, false);
+          if (rx.length < 6 + len) return;
+          const body = rx.slice(6, 6 + len);
+          rx = rx.slice(6 + len);
+          if (type === T.HELLO) {
+            if (body[1] === 1) S.codec = 'avc1.42E01F';
+            S.w = (body[2] << 8) | body[3]; S.h = (body[4] << 8) | body[5];
+            startDecoder();
+          } else if (type === T.VIDEO) {
+            decodeVideo(body);
+          }
+        }
+      }
+
+      // ── video: WebCodecs → full-screen letterboxed canvas ─────────────────
+      function startDecoder() {
+        if (S.dec) return;
+        if (typeof VideoDecoder === 'undefined') { setState('err', 'no WebCodecs (need HTTPS/localhost)'); return; }
+        S.dec = new VideoDecoder({
+          output: (f) => {
+            // Paint into the letterbox rect (aspect-preserving, centered) so the
+            // screen fills the page without distortion at any window size.
+            const vw = cv.clientWidth || f.displayWidth, vh = cv.clientHeight || f.displayHeight;
+            const r = paintRect();
+            if (cv.width !== vw || cv.height !== vh) { cv.width = vw; cv.height = vh; }
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, vw, vh);
+            ctx.drawImage(f, r.left, r.top, r.width, r.height);
+            f.close();
+            S.frames++;
+            const now = performance.now();
+            if (now - S.t0 >= 1000) {
+              S.fps = S.frames; S.frames = 0; S.t0 = now;
+              $('stats').textContent = `${S.w}×${S.h} · ${S.fps} fps`;
+            }
+          },
+          error: (e) => setState('err', String(e)),
+        });
+        S.dec.configure({ codec: S.codec, optimizeForLatency: true });
+        setState('live');
+      }
+      function hasIDR(b) {
+        let i = 0;
+        while (i + 3 < b.length) {
+          if (b[i] === 0 && b[i + 1] === 0 && (b[i + 2] === 1 || (b[i + 2] === 0 && b[i + 3] === 1))) {
+            const off = b[i + 2] === 1 ? i + 3 : i + 4;
+            if (off < b.length && (b[off] & 0x1f) === 5) return true;
+            i = off; continue;
+          }
+          i++;
+        }
+        return false;
+      }
+      function decodeVideo(b) {
+        if (!S.dec || S.dec.state !== 'configured') return;
+        const key = hasIDR(b);
+        if (!key && !S.gotKey) return;
+        if (key) S.gotKey = true;
+        try { S.dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta',
+          timestamp: performance.now() * 1000, data: b })); } catch {}
+      }
+
+      // The canvas covers the viewport; `object-fit`-style scaling is done by
+      // mapping pointer coords through the letterbox rect (below), so the
+      // canvas element itself is stretched — but we only ever PAINT into the
+      // letterbox rect, keeping aspect correct on any window size.
+      function fit() {
+        // No-op for the element (it is 100% via CSS); kept as a hook for future
+        // integer-scaling. Aspect is preserved in paintRect().
+      }
+      function paintRect() {
+        const vw = cv.clientWidth, vh = cv.clientHeight;
+        const sw = S.w || cv.width || 1, sh = S.h || cv.height || 1;
+        const scale = Math.min(vw / sw, vh / sh);
+        const w = sw * scale, h = sh * scale;
+        return { left: (vw - w) / 2, top: (vh - h) / 2, width: w, height: h };
+      }
+
+      // ── input (est only) ──────────────────────────────────────────────────
+      function toSource(clientX, clientY) {
+        const el = cv.getBoundingClientRect();
+        const r = paintRect();
+        const x = Math.round(((clientX - el.left - r.left) / r.width) * (S.w || 1));
+        const y = Math.round(((clientY - el.top - r.top) / r.height) * (S.h || 1));
+        return [Math.max(0, Math.min(S.w || 1e9, x)), Math.max(0, Math.min(S.h || 1e9, y))];
+      }
+      // A CSS-positioned cursor (the daemon does not draw one into the stream).
+      const cur = document.createElement('div');
+      cur.style.cssText = 'position:fixed;z-index:5;pointer-events:none;width:16px;height:16px;display:none';
+      cur.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16"><path fill="#fff" stroke="#000" d="M1 1l6 14 2-6 6-2z"/></svg>';
+      document.body.appendChild(cur);
+      function showCursor(x, y) { cur.style.display = ''; cur.style.left = (x - 2) + 'px'; cur.style.top = (y - 2) + 'px'; }
+
+      cv.addEventListener('mousemove', (e) => {
+        showCursor(e.clientX, e.clientY);
+        const [x, y] = toSource(e.clientX, e.clientY); sendMove(x, y);
+        if (e.clientY < 8) bar.classList.add('show'); else if (e.clientY > 60) bar.classList.remove('show');
+      });
+      cv.addEventListener('mousedown', (e) => {
+        e.preventDefault(); cv.focus({ preventScroll: true });
+        const [x, y] = toSource(e.clientX, e.clientY); sendMove(x, y);
+        sendButton(e.button === 2 ? 3 : e.button === 1 ? 2 : 1, true);
+      });
+      cv.addEventListener('mouseup', (e) => sendButton(e.button === 2 ? 3 : e.button === 1 ? 2 : 1, false));
+      cv.addEventListener('mouseleave', () => { cur.style.display = 'none'; });
+      cv.addEventListener('contextmenu', (e) => e.preventDefault());
+      cv.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const [x, y] = toSource(e.clientX, e.clientY);
+        const b = new Uint8Array(8); const d = new DataView(b.buffer);
+        d.setUint16(0, x, false); d.setUint16(2, y, false);
+        d.setInt16(4, e.deltaX, false); d.setInt16(6, e.deltaY, false);
+        send(frame(T.SCROLL, b));
+      }, { passive: false });
+
+      // touch: tap = click, long-press = right click, move = drag
+      let tStart = 0, tLast = [0, 0], tMoved = false, tPt = [0, 0];
+      cv.addEventListener('touchstart', (e) => {
+        e.preventDefault(); if (e.touches.length !== 1) return;
+        const t = e.touches[0]; tPt = toSource(t.clientX, t.clientY); tLast = tPt;
+        tMoved = false; tStart = Date.now(); sendMove(tPt[0], tPt[1]);
+      }, { passive: false });
+      cv.addEventListener('touchmove', (e) => {
+        e.preventDefault(); if (e.touches.length !== 1) return;
+        const t = e.touches[0]; const p = toSource(t.clientX, t.clientY);
+        if (!tMoved && (Math.abs(p[0] - tLast[0]) > 2 || Math.abs(p[1] - tLast[1]) > 2)) {
+          tMoved = true; sendButton(1, true);
+        }
+        tLast = p; sendMove(p[0], p[1]);
+      }, { passive: false });
+      cv.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        if (tMoved) { sendButton(1, false); return; }
+        if (Date.now() - tStart >= 600) { sendButton(3, true); sendButton(3, false); }
+        else { sendButton(1, true); sendButton(1, false); }
+      }, { passive: false });
+
+      // physical keyboard: named keys by `code`, printable by char
+      const NAMED = { Enter: 'Return', NumpadEnter: 'Return', Escape: 'Escape', Tab: 'Tab',
+        Backspace: 'Backspace', Delete: 'Delete', Space: 'Space',
+        ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+        Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown', Insert: 'Insert',
+        ShiftLeft: 'Shift', ShiftRight: 'Shift', ControlLeft: 'Control', ControlRight: 'Control',
+        AltLeft: 'Alt', AltRight: 'Alt', MetaLeft: 'Meta', MetaRight: 'Meta',
+        F1: 'F1', F2: 'F2', F3: 'F3', F4: 'F4', F5: 'F5', F6: 'F6', F7: 'F7', F8: 'F8',
+        F9: 'F9', F10: 'F10', F11: 'F11', F12: 'F12' };
+      function onKey(e, down) {
+        const named = NAMED[e.code];
+        if (named) { e.preventDefault(); sendKey(named, 0, down); return; }
+        if (down && e.key.length === 1) { e.preventDefault(); sendKey('', e.key.codePointAt(0), true); sendKey('', e.key.codePointAt(0), false); }
+      }
+      addEventListener('keydown', (e) => { if (!kbd.contains(document.activeElement) || document.activeElement === $('ime')) onKey(e, true); });
+      addEventListener('keyup', (e) => onKey(e, false));
+
+      // ── virtual keyboard drawer ───────────────────────────────────────────
+      const mods = { Control: false, Alt: false, Shift: false, Meta: false };
+      function toggleKbd(show) { kbd.classList.toggle('show', show ?? !kbd.classList.contains('show')); }
+      $('kbdToggle').onclick = () => toggleKbd();
+      $('kbdHide').onclick = () => toggleKbd(false);
+      $('btnKbd').onclick = () => toggleKbd();
+      $('btnCtrls').onclick = () => { toggleKbd(true); };
+      $('btnFs').onclick = () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen(); };
+      $('btnRetry').onclick = connect;
+      document.querySelectorAll('#mods .key').forEach((el) => {
+        el.onclick = () => { const m = el.dataset.mod; mods[m] = !mods[m]; el.classList.toggle('on', mods[m]); };
+      });
+      document.querySelectorAll('#kbd .key[data-key]').forEach((el) => {
+        el.onclick = () => {
+          const name = el.dataset.key;
+          for (const [m, on] of Object.entries(mods)) if (on) sendKey(m, 0, true);
+          sendKey(name, 0, true); sendKey(name, 0, false);
+          for (const [m, on] of Object.entries(mods)) if (on) { sendKey(m, 0, false); mods[m] = false; }
+          document.querySelectorAll('#mods .key').forEach((x) => x.classList.remove('on'));
+        };
+      });
+      // IME/CJK: focus the hidden input; each committed run is sent as text.
+      $('ime').addEventListener('input', (e) => { const v = e.target.value; if (v) { sendText(v); e.target.value = ''; } });
+      // top hot-zone reveals the bar; tap the screen's top edge too
+      $('hotzone').addEventListener('mouseenter', () => bar.classList.add('show'));
+      bar.addEventListener('mouseleave', () => bar.classList.remove('show'));
+      // on touch devices, a tap near the top-left corner toggles the bar
+      cv.addEventListener('touchstart', (e) => { const t = e.touches[0]; if (t.clientY < 40) bar.classList.toggle('show'); }, { capture: true });
+
+      // ── connection ────────────────────────────────────────────────────────
+      function setState(kind, msg) {
+        const el = $('state');
+        el.className = 'badge ' + (kind === 'live' ? 'live' : kind === 'err' ? 'err' : 'wait');
+        el.textContent = kind === 'live' ? 'live' : kind === 'err' ? (msg || 'error') : 'connecting';
+      }
+      function connect() {
+        close();
+        setState('wait');
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${proto}//${location.host}/est/ws`);
+        ws.binaryType = 'arraybuffer';
+        ws.onmessage = (ev) => { if (typeof ev.data === 'string') { setState('err', ev.data); return; } onBytes(new Uint8Array(ev.data)); };
+        ws.onerror = () => setState('err', 'websocket error');
+        ws.onclose = () => { if ($('state').textContent === 'live') setState('err', 'closed'); };
+        S.ws = ws;
+      }
+      function close() {
+        if (S.dec) { try { S.dec.close(); } catch {} S.dec = null; }
+        if (S.ws) { try { S.ws.close(); } catch {} S.ws = null; }
+        S.gotKey = false;
+      }
+      addEventListener('resize', fit);
+      connect();
+    </script>
+  </body>
+</html>
