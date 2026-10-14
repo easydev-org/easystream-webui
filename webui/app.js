@@ -285,7 +285,18 @@ addEventListener('keydown', (e) => {
   if (typingInField()) return; // let the IME field work
   const named = NAMED[e.code];
   if (named) { e.preventDefault(); sendKey(named, 0, true); return; }
-  if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); sendText(e.key); }
+  // A printable key with a modifier held (Ctrl+C, Alt+F, Meta+K, …) is a KEY
+  // event carrying the character, NOT a Text event: the daemon presses the
+  // named key while the modifier is held (the modifier keydown already fired).
+  if (e.key.length === 1) {
+    e.preventDefault();
+    if (e.ctrlKey || e.altKey || e.metaKey) {
+      sendKey(e.key, e.key.codePointAt(0), true);
+      sendKey(e.key, e.key.codePointAt(0), false);
+    } else {
+      sendText(e.key);
+    }
+  }
 });
 addEventListener('keyup', (e) => {
   if (typingInField()) return;
@@ -359,7 +370,10 @@ function connect() {
   close();
   setState('wait');
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${proto}//${location.host}/est/ws`);
+  // Resolve /est/ws RELATIVE to the page, so the UI works under any mount
+  // prefix (e.g. served at /easystream/ by a forwarder) — no absolute path.
+  const base = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
+  const ws = new WebSocket(`${proto}//${location.host}${base}est/ws`);
   ws.binaryType = 'arraybuffer';
   ws.onmessage = (ev) => { if (typeof ev.data === 'string') { setState('err', ev.data); return; } onBytes(new Uint8Array(ev.data)); };
   ws.onerror = () => setState('err', 'websocket error');
