@@ -111,19 +111,64 @@
         #kbd .key { height: 34px; font-size: 13px; }
         #kbd h4 { margin-top: 3px; }
       }
+          body.viewonly #kbd { display: none !important; }
+      body.viewonly #cursor-hint { display: none !important; }
+      /* right-edge menu button + slide-out panel (replaces the old top bar) */
+      #btnMenu { position: fixed; top: 10px; right: 10px; z-index: 40;
+        width: 44px; height: 44px; font-size: 20px; border-radius: 10px;
+        background: #000000aa; color: #eee; border: 1px solid var(--bd); }
+      #panel { position: fixed; top: 0; right: 0; bottom: 0; width: min(320px, 86vw);
+        z-index: 39; background: var(--bar); color: var(--fg);
+        border-left: 1px solid var(--bd); padding: 64px 14px 14px;
+        transform: translateX(100%); transition: transform .18s ease;
+        overflow-y: auto; }
+      #panel.show { transform: none; }
+      #panel .prow { display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; min-height: 44px; border-bottom: 1px solid var(--bd); }
+      #panel .prow label { opacity: .75; font-size: 13px; }
+      #panel .seg { display: flex; }
+      #panel .segbtn, #panel .toggle { min-height: 34px; padding: 4px 12px;
+        background: #ffffff10; color: var(--fg); border: 1px solid var(--bd); cursor: pointer; }
+      #panel .segbtn:first-child { border-radius: 8px 0 0 8px; }
+      #panel .segbtn:last-child { border-radius: 0 8px 8px 0; }
+      #panel .segbtn.on { background: var(--acc); color: #000; border-color: var(--acc); }
+      #panel .toggle.on { background: var(--acc); color: #000; border-color: var(--acc); }
     </style>
   </head>
   <body>
     <canvas id="screen" tabindex="0"></canvas>
-    <div id="hotzone"></div>
-    <div id="bar">
-      <b>easystream</b>
-      <span class="badge wait" id="state">connecting</span>
-      <span class="micro hideNarrow" id="stats">—</span>
-      <span class="grow"></span>
-      <button id="btnKbd">⌨</button>
-      <button id="btnFs">⛶</button>
-      <button id="btnRetry">↻</button>
+    <button id="btnMenu" title="menu" aria-label="menu">☰</button>
+    <div id="panel" role="dialog" aria-label="settings">
+      <div class="prow">
+        <span class="badge wait" id="state">connecting</span>
+        <span class="micro" id="stats">—</span>
+      </div>
+      <div class="prow">
+        <label>Mode</label>
+        <div class="seg">
+          <button id="modeView" class="segbtn">View</button>
+          <button id="modeControl" class="segbtn">Control</button>
+        </div>
+      </div>
+      <div class="prow">
+        <label>Audio</label>
+        <button id="audioToggle" class="toggle">Off</button>
+      </div>
+      <div class="prow">
+        <label>Clipboard</label>
+        <span>
+          <button id="btnCopy" title="copy local selection to guest">⧉↑</button>
+          <button id="btnPaste" title="paste guest clipboard locally">⧉↓</button>
+        </span>
+      </div>
+      <div class="prow">
+        <label>Actions</label>
+        <span>
+          <button id="btnKbd" title="keyboard">⌨</button>
+          <button id="btnFs" title="fullscreen">⛶</button>
+          <button id="btnRetry" title="reconnect">↻</button>
+        </span>
+      </div>
     </div>
     <button id="kbdToggle" title="keyboard">⌨</button>
     <div id="zoom">

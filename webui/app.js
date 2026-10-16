@@ -1,19 +1,20 @@
 // easystream-webui — est:// client: WebCodecs video (zoom/pan), pointer +
 // touch input, and a floating virtual keyboard. est-only (no a11y queries).
 
-const T = { HELLO: 0x01, VIDEO: 0x02,
-  MOVE: 0x10, BUTTON: 0x11, SCROLL: 0x12, KEY: 0x13, TEXT: 0x14 };
+const T = { HELLO: 0x01, VIDEO: 0x02, AUTH_OK: 0x04, AUDIO: 0x05,
+  MOVE: 0x10, BUTTON: 0x11, SCROLL: 0x12, KEY: 0x13, TEXT: 0x14,
+  AUDIO_REQ: 0x06, CLIP_GET: 0x30, CLIP_DATA: 0x31, CLIP_SET: 0x32 };
 
 const $ = (id) => document.getElementById(id);
 const cv = $('screen');
 const ctx = cv.getContext('2d');
 const kbd = $('kbd');
-const bar = $('bar');
+const panel = $('panel');
 // avc1.42E033 = H.264 Baseline, Level 5.1 — the level must cover 1080p (the
 // macOS encoder emits Level 4.0 = 0x28; a Level-3.1 string made the browser
 // reject 1920x1080 with EncodingError). Level 5.1 is a safe superset.
 const S = { ws: null, dec: null, codec: 'avc1.42E033', w: 0, h: 0, gotKey: false,
-  frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0 };
+  frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0, viewOnly: false, adec: null, actx: null, again: null, wantControl: false, wantAudio: false };
 
 // offscreen holds the latest frame at native size so zoom/pan repaint instantly.
 const off = document.createElement('canvas');
@@ -28,7 +29,13 @@ function frame(type, body) {
   out.set(b, 6);
   return out;
 }
-function send(bytes) { if (S.ws && S.ws.readyState === WebSocket.OPEN) S.ws.send(bytes); }
+// In view-only mode the browser must not even SEND a mutation frame (the
+// daemon drops them anyway, but not sending avoids pointless traffic).
+const MUTATION = new Set([0x10, 0x11, 0x12, 0x13, 0x14, 0x26, 0x32]);
+function send(bytes) {
+  if (S.viewOnly && bytes.length && MUTATION.has(bytes[0])) return;
+  if (S.ws && S.ws.readyState === WebSocket.OPEN) S.ws.send(bytes);
+}
 // Coalesce pointer moves to ONE per animation frame. Without this, every
 // pointermove during a press floods the guest with MOVE events, so a plain
 // click becomes "down + many drags + up" — which macOS treats as a long press.
@@ -65,6 +72,27 @@ function sendKey(name, ch, down) {
 }
 function sendText(s) { send(frame(T.TEXT, new TextEncoder().encode(s))); }
 
+// ── clipboard ───────────────────────────────────────────────────────────────
+// The browser clipboard is the LOCAL one (navigator.clipboard); the guest's is
+// the remote one. We bridge them on demand and on Ctrl+C / Ctrl+V.
+function clipSetRemote(text) { send(frame(T.CLIP_SET, new TextEncoder().encode(text))); }
+function clipGetRemote() { send(frame(T.CLIP_GET, new Uint8Array(0))); }
+async function localClipRead() {
+  try { return await navigator.clipboard.readText(); } catch { return ''; }
+}
+async function localClipWrite(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch { return false; }
+}
+// Copy: LOCAL selection -> guest clipboard.
+async function clipLocalToRemote() {
+  const t = await localClipRead();
+  if (t) clipSetRemote(t);
+}
+// Paste: guest clipboard -> LOCAL clipboard (then the user pastes in the guest
+// via Ctrl+V, which we forward as usual).
+function clipRemoteToLocal() { clipGetRemote(); }
+
+
 // ── inbound ─────────────────────────────────────────────────────────────────
 let rx = new Uint8Array(0);
 function onBytes(chunk) {
@@ -77,7 +105,19 @@ function onBytes(chunk) {
     if (rx.length < 6 + len) return;
     const body = rx.slice(6, 6 + len);
     rx = rx.slice(6 + len);
-    if (type === T.HELLO) {
+    if (type === T.AUDIO) {
+      if (S.adec && S.adec.state === 'configured') {
+        try { S.adec.decode(new EncodedAudioChunk({ type: 'key', timestamp: performance.now() * 1000, data: body })); } catch {}
+      }
+    } else if (type === T.CLIP_DATA) {
+      // u32 id, u32 len, text[len]
+      const len = new DataView(body.buffer, body.byteOffset).getUint32(4, false);
+      const txt = new TextDecoder().decode(body.slice(8, 8 + len));
+      localClipWrite(txt);
+    } else if (type === 0x04) { // AuthOk: body[0] = 0 view / 1 control / 0xFF fail
+      if (body[0] === 0xFF) { setState('err', 'auth failed'); return; }
+      applyMode(body[0] === 0);
+    } else if (type === T.HELLO) {
       if (body[1] === 1) S.codec = 'avc1.42E033';
       S.w = (body[2] << 8) | body[3]; S.h = (body[4] << 8) | body[5];
       off.width = S.w || 1; off.height = S.h || 1;
@@ -110,6 +150,38 @@ function startDecoder() {
   });
   S.dec.configure({ codec: S.codec, optimizeForLatency: true });
   setState('live');
+}
+// startAudio brings up an AudioDecoder (Opus) + an AudioContext. WebCodecs
+// audio needs a secure context just like video.
+function startAudio() {
+  if (S.adec) return;
+  if (typeof AudioDecoder === 'undefined') return; // no WebCodecs audio; silent
+  try {
+    S.actx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: S.aRate || 48000 });
+  } catch { return; }
+  S.adec = new AudioDecoder({
+    output: (frame) => playAudioFrame(frame),
+    error: () => {},
+  });
+  S.adec.configure({ codec: 'opus', sampleRate: S.aRate || 48000, numberOfChannels: S.aCh || 2 });
+}
+// playAudioFrame schedules one decoded PCM buffer on the AudioContext. We keep a
+// small play cursor so frames play back-to-back without gaps or overlap.
+function playAudioFrame(frame) {
+  if (!S.actx) return;
+  const ch = frame.numberOfChannels, n = frame.numberOfFrames;
+  const buf = S.actx.createBuffer(ch, n, frame.sampleRate);
+  for (let c = 0; c < ch; c++) {
+    const dst = buf.getChannelData(c);
+    frame.copyTo(dst, { planeIndex: c, format: 'f32-planar' });
+  }
+  frame.close();
+  const src = S.actx.createBufferSource();
+  src.buffer = buf; if (!S.gain) { S.gain = S.actx.createGain(); S.gain.connect(S.actx.destination); } src.connect(S.gain);
+  const now = S.actx.currentTime;
+  const at = Math.max(now + 0.02, S.anext || 0);
+  src.start(at);
+  S.anext = at + buf.duration;
 }
 function hasIDR(b) {
   let i = 0;
@@ -188,6 +260,26 @@ function zoomTo(scale, cx, cy) {
   S.panY += py - (after.top + sy * after.height);
   clampPan(); paint();
 }
+
+// setView anchors the view so the normalized SOURCE point (u,v) — 0..1 within
+// the guest screen — lands exactly on pixel (px,py). This is what makes pinch
+// and drag follow the finger instead of re-centring the screen.
+function setView(scale, u, v, px, py) {
+  const { vw, vh } = vp();
+  const sw = S.w || off.width || 1, sh = S.h || off.height || 1;
+  const fit = Math.min(vw / sw, vh / sh);
+  S.userScale = Math.max(0.25, Math.min(8, scale));
+  const w = sw * fit * S.userScale, h = sh * fit * S.userScale;
+  S.panX = px - (vw - w) / 2 - u * w;
+  S.panY = py - (vh - h) / 2 - v * h;
+  clampPan(); paint();
+}
+// srcUV maps a client point to the normalized source point under it.
+function srcUV(clientX, clientY) {
+  const el = cv.getBoundingClientRect();
+  const r = drawRect();
+  return [ (clientX - el.left - r.left) / r.width, (clientY - el.top - r.top) / r.height ];
+}
 function zoomBy(f, cx, cy) { zoomTo(S.userScale * f, cx, cy); }
 function fitView() { S.userScale = 1; S.panX = 0; S.panY = 0; clampPan(); paint(); }
 function oneToOne() {
@@ -216,11 +308,35 @@ document.body.appendChild(cur);
 function showCursor(x, y) { cur.style.display = ''; cur.style.left = (x - 2) + 'px'; cur.style.top = (y - 2) + 'px'; }
 
 const pts = new Map();
-let pinch = null;
-let touch = null; // single-touch mouse emulation
+let gest = null;   // multi-finger gesture (2 or 3 fingers): scale + pan
+let touch = null;  // single-finger mouse emulation
 
 function pDist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 function pMid(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; }
+// Centroid of ALL active touch points (2 or 3 fingers). Using the centroid (not
+// just the midpoint of the first two) makes a 3-finger drag pan naturally and
+// keeps the anchor stable as fingers are added/removed.
+function pCentroid() {
+  let x = 0, y = 0, n = 0;
+  for (const p of pts.values()) { x += p.x; y += p.y; n++; }
+  return n ? { x: x / n, y: y / n } : { x: 0, y: 0 };
+}
+// Mean distance from the centroid — a rotation-invariant "spread" for scale.
+function pSpread(c) {
+  let d = 0, n = 0;
+  for (const p of pts.values()) { d += Math.hypot(p.x - c.x, p.y - c.y); n++; }
+  return n ? d / n : 1;
+}
+// beginGest snapshots the view so moves can be expressed relative to it. The
+// anchor (u,v) is the source point under the centroid at gesture start: it must
+// stay under the (moving) centroid, which is what "follow the finger" means.
+function beginGest() {
+  if (pts.size < 2) { gest = null; return; }
+  const c = pCentroid();
+  const [u, v] = srcUV(c.x, c.y);
+  gest = { spread0: Math.max(1, pSpread(c)), scale0: S.userScale, u, v };
+  if (touch) { if (touch.down) sendButton(1, false); touch = null; }
+}
 
 cv.addEventListener('pointerdown', (e) => {
   try { cv.setPointerCapture(e.pointerId); } catch {}
@@ -233,10 +349,10 @@ cv.addEventListener('pointerdown', (e) => {
     const [x, y] = toSource(e.clientX, e.clientY);
     touch = { startX: e.clientX, startY: e.clientY, moved: false, down: false, t0: Date.now() };
     sendMove(x, y);
-  } else if (pts.size === 2) {
-    if (touch) { if (touch.down) sendButton(1, false); touch = null; }
-    const [a, b] = [...pts.values()];
-    pinch = { dist: pDist(a, b), mid: pMid(a, b), scale0: S.userScale, panX0: S.panX, panY0: S.panY };
+  } else {
+    // 2 or 3 fingers -> gesture (pinch-zoom + pan). Adding/removing a finger
+    // re-snapshots so the anchor never jumps.
+    beginGest();
   }
 });
 
@@ -247,19 +363,20 @@ cv.addEventListener('pointermove', (e) => {
     return;
   }
   pts.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
-  if (pts.size === 2 && pinch) {
-    const [a, b] = [...pts.values()];
-    const d = pDist(a, b), m = pMid(a, b);
-    S.userScale = Math.max(0.25, Math.min(8, pinch.scale0 * (d / pinch.dist)));
-    S.panX = pinch.panX0 + (m.x - pinch.mid.x);
-    S.panY = pinch.panY0 + (m.y - pinch.mid.y);
-    clampPan(); paint();
+  if (pts.size >= 2) {
+    if (!gest) beginGest();
+    const c = pCentroid();
+    const spread = Math.max(1, pSpread(c));
+    const scale = gest.scale0 * (spread / gest.spread0);
+    // Anchor the source point that was under the centroid at gesture start onto
+    // the CURRENT centroid: pinch follows the fingers, drag pans. No re-centre.
+    setView(scale, gest.u, gest.v, c.x, c.y);
     return;
   }
   if (e.pointerType === 'mouse') {
     showCursor(e.clientX, e.clientY);
     const [x, y] = toSource(e.clientX, e.clientY); sendMove(x, y);
-    if (e.clientY < 8) bar.classList.add('show'); else if (e.clientY > 64) bar.classList.remove('show');
+    // no top bar anymore; the menu button is always visible
     return;
   }
   if (touch) {
@@ -284,7 +401,8 @@ function endPointer(e) {
     }
     touch = null;
   }
-  if (pts.size < 2) pinch = null;
+  if (pts.size < 2) gest = null;
+  else if (gest) beginGest(); // a finger left but >=2 remain: re-snapshot
 }
 cv.addEventListener('pointerup', endPointer);
 cv.addEventListener('pointercancel', endPointer);
@@ -312,6 +430,14 @@ const NAMED = { Enter: 'Return', NumpadEnter: 'Return', Escape: 'Escape', Tab: '
 function typingInField() { const a = document.activeElement; return a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA'); }
 addEventListener('keydown', (e) => {
   if (typingInField()) return; // let the IME field work
+  // Clipboard bridge: Cmd/Ctrl+C pushes the LOCAL selection to the guest,
+  // Cmd/Ctrl+V pulls the GUEST clipboard to the local one. We still forward the
+  // key itself so the guest performs its own copy/paste in the focused field.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'c' || e.key === 'C')) {
+    clipLocalToRemote();
+  } else if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'v' || e.key === 'V')) {
+    clipRemoteToLocal();
+  }
   const named = NAMED[e.code];
   if (named) { e.preventDefault(); sendKey(named, 0, true); return; }
   // A printable key with a modifier held (Ctrl+C, Alt+F, Meta+K, …) is a KEY
@@ -345,8 +471,38 @@ $('kbdHide').onclick = () => toggleKbd(false);
 $('btnKbd').onclick = () => toggleKbd();
 $('btnFs').onclick = () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.(); };
 $('btnRetry').onclick = connect;
-$('hotzone').addEventListener('mouseenter', () => bar.classList.add('show'));
-bar.addEventListener('mouseleave', () => bar.classList.remove('show'));
+
+// Mode: View (no token) <-> Control (needs the control token). Switching
+// reconnects with/without the token; the daemon answers with AuthOk.
+let controlToken = '';
+function setMode(control) {
+  S.wantControl = control;
+  $('modeView').classList.toggle('on', !control);
+  $('modeControl').classList.toggle('on', control);
+  if (control && !controlToken) {
+    controlToken = prompt('Control token:') || '';
+    if (!controlToken) { S.wantControl = false; $('modeControl').classList.remove('on'); $('modeView').classList.add('on'); return; }
+  }
+  connect();
+}
+$('modeView').onclick = () => setMode(false);
+$('modeControl').onclick = () => setMode(true);
+
+// Audio: off by default (the viewer asks for it explicitly).
+$('audioToggle').onclick = () => {
+  S.wantAudio = !S.wantAudio;
+  $('audioToggle').textContent = S.wantAudio ? 'On' : 'Off';
+  $('audioToggle').classList.toggle('on', S.wantAudio);
+  if (S.wantAudio) audioResume();
+  connect(); // re-handshake so the daemon starts/!stops the audio stream
+};
+// Menu button toggles the settings panel; clicking outside closes it.
+$('btnMenu').onclick = (e) => { e.stopPropagation(); panel.classList.toggle('show'); };
+document.addEventListener('pointerdown', (e) => {
+  if (panel.classList.contains('show') && !panel.contains(e.target) && e.target.id !== 'btnMenu') {
+    panel.classList.remove('show');
+  }
+});
 
 function buildRow(el, chars) {
   for (const c of chars) {
@@ -395,6 +551,28 @@ function setState(kind, msg) {
   el.className = 'badge ' + (kind === 'live' ? 'live' : kind === 'err' ? 'err' : 'wait');
   el.textContent = kind === 'live' ? 'live' : kind === 'err' ? (msg || 'error') : 'connecting';
 }
+// token comes from the URL (?token=… or #token=…) so a viewer link can carry
+// it; it is sent via the WebSocket SUBPROTOCOL (not the URL of the ws itself),
+// which keeps it out of the ws request line / logs.
+function accessToken() {
+  const q = new URLSearchParams(location.search);
+  let t = q.get('token');
+  if (!t && location.hash.startsWith('#token=')) t = decodeURIComponent(location.hash.slice(7));
+  return t || '';
+}
+// applyMode hides/disables the input surfaces when the daemon says we are
+// read-only (the AuthOk frame carries the mode).
+function applyMode(viewOnly) {
+  S.viewOnly = viewOnly;
+  // Reflect the daemon's answer in the mode switch.
+  if ($('modeView')) $('modeView').classList.toggle('on', viewOnly);
+  if ($('modeControl')) $('modeControl').classList.toggle('on', !viewOnly);
+  document.body.classList.toggle('viewonly', viewOnly);
+  const kb = $('btnKbd'), ime = $('ime');
+  if (kb) kb.style.display = viewOnly ? 'none' : '';
+  if (ime) ime.disabled = viewOnly;
+  if (viewOnly) { const k = $('kbd'); if (k) k.classList.remove('show'); }
+}
 function connect() {
   close();
   setState('wait');
@@ -402,8 +580,16 @@ function connect() {
   // Resolve /est/ws RELATIVE to the page, so the UI works under any mount
   // prefix (e.g. served at /easystream/ by a forwarder) — no absolute path.
   const base = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
-  const ws = new WebSocket(`${proto}//${location.host}${base}est/ws`);
+  // Control needs the token; View is the open default (no token). An explicit
+  // ?token= in the URL is also honoured (and implies control if it matches).
+  const urlTok = accessToken();
+  const tok = S.wantControl ? (controlToken || urlTok) : '';
+  // Audio is requested per-connection via a query flag the daemon reads.
+  const q = (S.wantAudio ? '?audio=1' : '');
+  const url = `${proto}//${location.host}${base}est/ws${q}`;
+  const ws = tok ? new WebSocket(url, ['est', tok]) : new WebSocket(url, ['est']);
   ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { if (S.wantAudio) send(frame(T.AUDIO_REQ, new Uint8Array(0))); };
   ws.onmessage = (ev) => { if (typeof ev.data === 'string') { setState('err', ev.data); return; } onBytes(new Uint8Array(ev.data)); };
   ws.onerror = () => setState('err', 'websocket error');
   ws.onclose = () => { if ($('state').textContent === 'live') setState('err', 'closed'); };
@@ -411,10 +597,30 @@ function connect() {
 }
 function close() {
   if (S.dec) { try { S.dec.close(); } catch {} S.dec = null; }
+  if (S.adec) { try { S.adec.close(); } catch {} S.adec = null; }
+  if (S.actx) { try { S.actx.close(); } catch {} S.actx = null; }
+  S.anext = 0;
   if (S.ws) { try { S.ws.close(); } catch {} S.ws = null; }
   S.gotKey = false;
 }
 addEventListener('resize', resize);
 addEventListener('orientationchange', () => setTimeout(resize, 150));
+// Clipboard buttons (explicit, in addition to Ctrl+C/V — some browsers gate the
+// async clipboard API behind a user gesture).
+const bc = $('btnCopy'), bp = $('btnPaste');
+if (bc) bc.onclick = () => clipLocalToRemote();
+if (bp) bp.onclick = () => clipRemoteToLocal();
+// Audio: browsers gate playback behind a user gesture, so resume the context on
+// the first interaction and expose a mute toggle.
+function audioResume() { if (S.actx && S.actx.state === 'suspended') S.actx.resume(); }
+const bm = $('btnMute');
+if (bm) bm.onclick = () => {
+  audioResume();
+  if (!S.actx) return;
+  const on = !S.muted; S.muted = on;
+  if (S.gain) S.gain.gain.value = on ? 0 : 1;
+  bm.textContent = on ? '🔇' : '🔊';
+};
+document.addEventListener('pointerdown', audioResume, { once: false });
 resize();
 connect();
