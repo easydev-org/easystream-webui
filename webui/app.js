@@ -16,8 +16,7 @@ const panel = $('panel');
 const S = { ws: null, dec: null, codec: 'avc1.42E033', w: 0, h: 0, gotKey: false,
   frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0, viewOnly: false, adec: null, actx: null, again: null, wantControl: false, wantAudio: true, openKbdAfterControl: false, muted: false, anext: 0, aDecoded: 0 };
 
-// View pan: panMode = HAND TOOL (any drag pans the view); panDrag = an active pan.
-let panMode = false;
+// panDrag = an active view pan (a normal drag, a middle-button drag, or 2+ fingers).
 let panDrag = null;
 
 // offscreen holds the latest frame at native size so zoom/pan repaint instantly.
@@ -302,12 +301,6 @@ function oneToOne() {
   const dpr = window.devicePixelRatio || 1;
   zoomTo(1 / (fit * dpr));
 }
-$('zPan').onclick = () => {
-  panMode = !panMode;
-  $('zPan').classList.toggle('on', panMode);
-  cv.style.cursor = panMode ? 'grab' : '';
-  toast(panMode ? 'Pan mode ON — drag to move the view' : 'Pan mode off');
-};
 $('zIn').onclick = () => zoomBy(1.25);
 $('zOut').onclick = () => zoomBy(0.8);
 $('zFit').onclick = fitView;
@@ -358,91 +351,119 @@ function beginGest() {
   if (touch) { if (touch.down) sendButton(1, false); touch = null; }
 }
 
+// ── pointer: DEFAULT DRAG PANS THE VIEW ─────────────────────────────────────
+// A press that never moves is a CLICK; once it moves it becomes a PAN (or, with
+// Shift, a drag inside the guest). Nothing is sent to the guest on pointerdown,
+// which is what lets a drag pan instead of selecting in the guest.
+//   mouse : drag = pan view ; Shift+drag = drag in guest ; click = click
+//   touch : 1-finger drag = pan view ; tap = click ; long-press = right click
+//   2/3 fingers : pinch zoom + pan (unchanged)
+let press = null;   // { x, y, t0, pointerId, type, shift, guest }
+
 cv.addEventListener('pointerdown', (e) => {
   try { cv.setPointerCapture(e.pointerId); } catch {}
   pts.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
   cv.focus({ preventScroll: true });
-  if (panMode) {
-    // Hand tool: ANY pointer (mouse or single finger) drags the view.
-    panDrag = { x: e.clientX, y: e.clientY, panX: S.panX, panY: S.panY };
-    cv.style.cursor = 'grabbing';
-    return;
-  }
+
   if (e.pointerType === 'mouse') {
-    if (e.button === 1 || e.shiftKey) {
-      // MIDDLE button (or Shift+left) PANS the view instead of reaching the
-      // guest: the left button must stay a real click/drag for the guest.
+    if (e.button === 1) {              // middle button: always pan
       panDrag = { x: e.clientX, y: e.clientY, panX: S.panX, panY: S.panY };
+      cv.style.cursor = 'grabbing';
       e.preventDefault();
       return;
     }
-    const [x, y] = toSource(e.clientX, e.clientY); sendMove(x, y);
-    sendButton(e.button === 2 ? 3 : e.button === 1 ? 2 : 1, true);
-  } else if (pts.size === 1) {
-    const [x, y] = toSource(e.clientX, e.clientY);
-    touch = { startX: e.clientX, startY: e.clientY, moved: false, down: false, t0: Date.now() };
-    sendMove(x, y);
+    if (e.button === 2) {              // right button: click in the guest
+      const [x, y] = toSource(e.clientX, e.clientY);
+      sendMove(x, y); sendButton(3, true); sendButton(3, false);
+      return;
+    }
+    press = { x: e.clientX, y: e.clientY, t0: Date.now(), pointerId: e.pointerId,
+              type: 'mouse', shift: e.shiftKey, guest: false };
+    return;
+  }
+
+  // touch
+  if (pts.size === 1) {
+    press = { x: e.clientX, y: e.clientY, t0: Date.now(), pointerId: e.pointerId,
+              type: 'touch', shift: false, guest: false };
   } else {
-    // 2 or 3 fingers -> gesture (pinch-zoom + pan). Adding/removing a finger
-    // re-snapshots so the anchor never jumps.
+    press = null;                      // a 2nd finger cancels the pending click
     beginGest();
   }
 });
 
 cv.addEventListener('pointermove', (e) => {
-  if (!pts.has(e.pointerId)) {
+  if (!pts.has(e.pointerId)) {         // hover (no button): keep the guest cursor
     if (e.pointerType === 'mouse') { showCursor(e.clientX, e.clientY);
       const [x, y] = toSource(e.clientX, e.clientY); sendMove(x, y); }
     return;
   }
   pts.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
-  if (panDrag) {
+
+  if (panDrag) {                       // an active view pan
     S.panX = panDrag.panX + (e.clientX - panDrag.x);
     S.panY = panDrag.panY + (e.clientY - panDrag.y);
     clampPan(); paint();
     return;
   }
-  if (pts.size >= 2) {
+
+  if (pts.size >= 2) {                 // 2+ fingers: zoom + pan
     if (!gest) beginGest();
     const c = pCentroid();
     const spread = Math.max(1, pSpread(c));
     const scale = gest.scale0 * (spread / gest.spread0);
-    // Anchor the source point that was under the centroid at gesture start onto
-    // the CURRENT centroid: pinch follows the fingers, drag pans. No re-centre.
     setView(scale, gest.u, gest.v, c.x, c.y);
     return;
   }
-  if (e.pointerType === 'mouse') {
-    showCursor(e.clientX, e.clientY);
-    const [x, y] = toSource(e.clientX, e.clientY); sendMove(x, y);
-    // no top bar anymore; the menu button is always visible
+
+  // A pending single-pointer press: decide what it becomes once it moves.
+  if (press && press.pointerId === e.pointerId) {
+    const dx = e.clientX - press.x, dy = e.clientY - press.y;
+    const th = e.pointerType === 'mouse' ? 4 : 8;
+    if (!press.guest && Math.hypot(dx, dy) > th) {
+      if (press.shift) {               // Shift: drag INSIDE the guest
+        const [sx, sy] = toSource(press.x, press.y);
+        sendMove(sx, sy); sendButton(1, true);
+        press.guest = true;
+      } else {                         // otherwise: pan the view
+        panDrag = { x: e.clientX, y: e.clientY, panX: S.panX, panY: S.panY };
+        cv.style.cursor = 'grabbing';
+        press = null;
+        return;
+      }
+    }
+    if (press && press.guest) {
+      const [x, y] = toSource(e.clientX, e.clientY); sendMove(x, y);
+    } else if (e.pointerType === 'mouse' && !press) {
+      showCursor(e.clientX, e.clientY);
+    }
     return;
   }
-  if (touch) {
-    const dx = e.clientX - touch.startX, dy = e.clientY - touch.startY;
-    if (!touch.moved && Math.hypot(dx, dy) > 6) { touch.moved = true; sendButton(1, true); touch.down = true; }
-    if (touch.moved) { const [x, y] = toSource(e.clientX, e.clientY); sendMove(x, y); }
-  }
+
+  if (e.pointerType === 'mouse') { showCursor(e.clientX, e.clientY); }
 });
 
 function endPointer(e) {
-  if (panDrag) { panDrag = null; cv.style.cursor = panMode ? 'grab' : ''; if (!pts.has(e.pointerId)) return; }
+  if (panDrag) { panDrag = null; cv.style.cursor = ''; }
   if (!pts.has(e.pointerId)) return;
   pts.delete(e.pointerId);
-  if (e.pointerType === 'mouse') {
-    sendButton(e.button === 2 ? 3 : e.button === 1 ? 2 : 1, false);
-  } else if (pts.size === 0 && touch) {
-    if (touch.moved) { if (touch.down) sendButton(1, false); }
-    else {
-      const [x, y] = toSource(e.clientX, e.clientY); sendMove(x, y);
-      const held = Date.now() - touch.t0;
-      if (held >= 600) { sendButton(3, true); sendButton(3, false); }
-      else { sendButton(1, true); sendButton(1, false); }
+
+  if (press && press.pointerId === e.pointerId) {
+    if (press.guest) {
+      sendButton(1, false);            // finish a Shift drag
+    } else {
+      // No movement -> a CLICK at the release point.
+      const [x, y] = toSource(e.clientX, e.clientY);
+      sendMove(x, y);
+      const held = Date.now() - press.t0;
+      const btn = (press.type === 'touch' && held >= 600) ? 3 : 1;  // long-press = right
+      sendButton(btn, true); sendButton(btn, false);
     }
-    touch = null;
+    press = null;
   }
+
   if (pts.size < 2) gest = null;
-  else if (gest) beginGest(); // a finger left but >=2 remain: re-snapshot
+  else if (gest) beginGest();          // a finger left but >=2 remain
 }
 cv.addEventListener('pointerup', endPointer);
 cv.addEventListener('pointercancel', endPointer);
