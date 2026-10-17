@@ -51,33 +51,66 @@
         background: var(--bar); border: 1px solid var(--bd); border-radius: 12px;
         padding: 10px 14px; backdrop-filter: blur(8px); font-size: 16px;
       }
+      /* Keyboard: a FIXED-HEIGHT panel with TABBED groups (like a phone IME).
+         Every key is the SAME size; no scrolling. */
       #kbd {
         position: fixed; left: 0; top: 0; bottom: 0; width: var(--kbdw); z-index: 26;
         background: var(--bar); backdrop-filter: blur(12px);
         border-right: 1px solid var(--bd); padding: 8px;
         padding-top: calc(8px + env(safe-area-inset-top));
         padding-bottom: calc(8px + env(safe-area-inset-bottom));
-        overflow-y: auto; -webkit-overflow-scrolling: touch;
         transform: translateX(-102%); transition: transform .18s ease;
         display: flex; flex-direction: column; gap: 6px;
+        overflow: hidden;                 /* no scroll: tabs swap panes */
       }
       #kbd.show { transform: none; }
-      #kbd .head { display: flex; align-items: center; justify-content: space-between; }
-      #kbd h4 { margin: 6px 0 0; font-weight: 600; font-size: 11px; color: #aaa;
-        text-transform: uppercase; letter-spacing: .5px; }
-      #kbd .row { display: flex; gap: 4px; }
+      #kbd .head { display: flex; align-items: center; gap: 8px; }
+      #kbd .head b { flex: 1 1 auto; }
+      #kbd .head button { min-height: 26px; padding: 2px 10px; }
+      #kbd .sticky-badge { font-size: 10px; color: var(--acc); white-space: nowrap; }
+      /* Tab bar */
+      #kbd .tabs { display: flex; gap: 4px; }
+      #kbd .tabs .tab {
+        flex: 1 1 0; min-width: 0; height: 32px; font-size: 12px;
+        background: #ffffff10; color: var(--fg); border: 1px solid var(--bd);
+        border-radius: 8px; cursor: pointer; padding: 0;
+      }
+      #kbd .tabs .tab.on { background: var(--acc); color: #000; border-color: var(--acc); }
+      /* Panes: only the active one is shown; the panel height is fixed. */
+      #kbd .panes { flex: 1 1 auto; min-height: 0; position: relative; }
+      #kbd .pane { position: absolute; inset: 0; display: none;
+        flex-direction: column; gap: 6px; }
+      #kbd .pane.on { display: flex; }
+      /* Grids: every key the SAME width AND height. Rows are 1fr each. */
+      #kbd .g3, #kbd .g4, #kbd .g6, #kbd .g9, #kbd .g10 {
+        display: grid; gap: 6px; flex: 1 1 0; min-height: 0;
+      }
+      #kbd .g3 { grid-template-columns: repeat(3, 1fr); }
+      #kbd .g4 { grid-template-columns: repeat(4, 1fr); }
+      #kbd .g6 { grid-template-columns: repeat(6, 1fr); }
+      /* 9-key rows (asdf… / zxcv…): centred, each key the SAME width as a
+         10-column key, so the whole keyboard reads as one grid. */
+      #kbd .g9 { display: flex; justify-content: center; }
+      #kbd .g9 .key { flex: 0 0 calc((100% - 9 * 6px) / 10); }
+      #kbd .g10 { grid-template-columns: repeat(10, 1fr); }
       #kbd .key {
-        flex: 1 1 0; min-width: 0; height: 42px; display: flex; align-items: center;
-        justify-content: center; border: 1px solid var(--bd); border-radius: 8px;
-        background: #ffffff10; user-select: none; cursor: pointer; font-size: 15px;
+        display: flex; align-items: center; justify-content: center;
+        min-width: 0; min-height: 0; height: 100%; overflow: hidden;
+        border: 1px solid var(--bd); border-radius: 8px;
+        background: #ffffff10; user-select: none; cursor: pointer;
+        font-size: 13px; line-height: 1;
       }
       #kbd .key:active { background: var(--acc); color: #000; }
       #kbd .key.mod.on { background: var(--acc); color: #000; border-color: var(--acc); }
-      #kbd .key.sm { font-size: 12px; }
-      #kbd .key.wide { flex: 1.7 1 0; }
-      #kbd .key.space { flex: 4 1 0; }
-      #kbd .key.enter { flex: 2 1 0; }
-      #kbd .sticky-badge { font-size: 10px; color: var(--acc); min-height: 14px; }
+      /* Bottom letters row (Shift / space / ⌫): a 10-column grid where Shift
+         and ⌫ are 2 columns and space is 6 — same HEIGHT as every key. */
+      #kbd .g10.grow { grid-template-columns: repeat(10, 1fr); }
+      #kbd .g10.grow .key:nth-child(1) { grid-column: span 2; }
+      #kbd .g10.grow .key:nth-child(2) { grid-column: span 6; }
+      #kbd .g10.grow .key:nth-child(3) { grid-column: span 2; }
+      #kbd .pane .hint { font-size: 11px; color: #999; }
+      #kbd #ime { width: 100%; min-height: 40px; background: #00000055; color: #eee;
+        border: 1px solid var(--bd); border-radius: 8px; padding: 8px; font-size: 15px; }
       #zoom {
         position: fixed; right: 12px; z-index: 25;
         bottom: calc(12px + env(safe-area-inset-bottom));
@@ -93,7 +126,7 @@
            termux/noVNC-mobile pattern. A left drawer would cover the screen. */
         #kbd {
           left: 0; right: 0; top: auto; bottom: 0; width: auto;
-          max-height: 62vh; border-right: none; border-top: 1px solid var(--bd);
+          height: 46vh; max-height: 46vh; border-right: none; border-top: 1px solid var(--bd);
           border-radius: 14px 14px 0 0;
           transform: translateY(102%);
           box-shadow: 0 -8px 24px #000a;
@@ -184,96 +217,100 @@
     <div id="kbd">
       <div class="head">
         <b>Keyboard</b>
-        <button id="kbdHide" style="min-height:28px;padding:2px 10px">✕</button>
+        <span class="sticky-badge" id="stickyBadge"></span>
+        <button id="kbdHide">✕</button>
       </div>
-      <div class="sticky-badge" id="stickyBadge"></div>
-      <h4>Modifiers</h4>
-      <div class="row" id="mods">
-        <div class="key mod sm" data-mod="Control">Ctrl</div>
-        <div class="key mod sm" data-mod="Alt">Alt</div>
-        <div class="key mod sm" data-mod="Shift">Shift</div>
-        <div class="key mod sm" data-mod="Meta">Meta</div>
+      <div class="tabs" id="kbdTabs">
+        <button class="tab on" data-tab="letters">ABC</button>
+        <button class="tab" data-tab="edit">Edit</button>
+        <button class="tab" data-tab="nav">Nav</button>
+        <button class="tab" data-tab="fn">Fn</button>
+        <button class="tab" data-tab="sym">#+</button>
+        <button class="tab" data-tab="ime">IME</button>
       </div>
-      <h4>Editing</h4>
-      <div class="row">
-        <div class="key sm" data-key="Escape">Esc</div>
-        <div class="key sm" data-key="Tab">Tab</div>
-        <div class="key sm" data-key="Backspace">⌫</div>
-        <div class="key sm" data-key="Delete">Del</div>
-        <div class="key sm" data-key="Insert">Ins</div>
+      <div class="panes">
+        <!-- Letters: a phone-style QWERTY, every key the same size -->
+        <div class="pane on" data-pane="letters">
+          <div class="g10" id="rowDigits"></div>
+          <div class="g10" id="row1"></div>
+          <div class="g9" id="row2"></div>
+          <div class="g9" id="row3"></div>
+          <div class="g10 grow">
+            <div class="key" data-key="Shift">⇧</div>
+            <div class="key" data-txt=" ">space</div>
+            <div class="key" data-key="Backspace">⌫</div>
+          </div>
+        </div>
+        <!-- Edit: modifiers + editing keys, all the same size -->
+        <div class="pane" data-pane="edit">
+          <div class="g4">
+            <div class="key mod" data-mod="Control">Ctrl</div>
+            <div class="key mod" data-mod="Alt">Alt</div>
+            <div class="key mod" data-mod="Shift">Shift</div>
+            <div class="key mod" data-mod="Meta">Meta</div>
+          </div>
+          <div class="g4">
+            <div class="key" data-key="Escape">Esc</div>
+            <div class="key" data-key="Tab">Tab</div>
+            <div class="key" data-key="Delete">Del</div>
+            <div class="key" data-key="Insert">Ins</div>
+          </div>
+          <div class="g4">
+            <div class="key" data-key="Backspace">⌫</div>
+            <div class="key" data-key="Return">⏎</div>
+            <div class="key" data-key="Space">Space</div>
+            <div class="key" data-key="CapsLock">Caps</div>
+          </div>
+        </div>
+        <!-- Nav: arrows + paging, same size -->
+        <div class="pane" data-pane="nav">
+          <div class="g3">
+            <div class="key" data-key="Home">Home</div>
+            <div class="key" data-key="Up">↑</div>
+            <div class="key" data-key="End">End</div>
+          </div>
+          <div class="g3">
+            <div class="key" data-key="Left">←</div>
+            <div class="key" data-key="Down">↓</div>
+            <div class="key" data-key="Right">→</div>
+          </div>
+          <div class="g3">
+            <div class="key" data-key="PageUp">PgUp</div>
+            <div class="key" data-key="PageDown">PgDn</div>
+            <div class="key" data-key="Return">⏎</div>
+          </div>
+          <div class="g3">
+            <div class="key" data-key="SystemBack">Back</div>
+            <div class="key" data-key="SystemHome">Home</div>
+            <div class="key" data-key="Recents">Recents</div>
+          </div>
+        </div>
+        <!-- Fn: F1..F12 in a 6x2 grid, same size -->
+        <div class="pane" data-pane="fn">
+          <div class="g6">
+            <div class="key" data-key="F1">F1</div><div class="key" data-key="F2">F2</div>
+            <div class="key" data-key="F3">F3</div><div class="key" data-key="F4">F4</div>
+            <div class="key" data-key="F5">F5</div><div class="key" data-key="F6">F6</div>
+          </div>
+          <div class="g6">
+            <div class="key" data-key="F7">F7</div><div class="key" data-key="F8">F8</div>
+            <div class="key" data-key="F9">F9</div><div class="key" data-key="F10">F10</div>
+            <div class="key" data-key="F11">F11</div><div class="key" data-key="F12">F12</div>
+          </div>
+        </div>
+        <!-- Sym: punctuation, 10 per row, same size -->
+        <div class="pane" data-pane="sym">
+          <div class="g10" id="rowSym1"></div>
+          <div class="g10" id="rowSym2"></div>
+          <div class="g10" id="rowSym3"></div>
+        </div>
+        <!-- IME / CJK text entry -->
+        <div class="pane" data-pane="ime">
+          <input id="ime" autocomplete="off" autocapitalize="off" spellcheck="false"
+                 placeholder="type here for IME / CJK…" />
+          <div class="hint">Text typed here is sent as one TEXT frame.</div>
+        </div>
       </div>
-      <h4>Arrows</h4>
-      <div class="row">
-        <div class="key sm" data-key="Home">Home</div>
-        <div class="key sm" data-key="Up">↑</div>
-        <div class="key sm" data-key="End">End</div>
-      </div>
-      <div class="row">
-        <div class="key sm" data-key="Left">←</div>
-        <div class="key sm" data-key="Down">↓</div>
-        <div class="key sm" data-key="Right">→</div>
-      </div>
-      <div class="row">
-        <div class="key sm" data-key="PageUp">PgUp</div>
-        <div class="key sm" data-key="PageDown">PgDn</div>
-        <div class="key sm" data-key="Return">⏎</div>
-      </div>
-      <h4>System</h4>
-      <div class="row">
-        <div class="key sm" data-key="SystemBack">Back</div>
-        <div class="key sm" data-key="SystemHome">Home</div>
-        <div class="key sm" data-key="Recents">Recents</div>
-        <div class="key sm" data-key="Notifications">Shade</div>
-      </div>
-      <h4>Function</h4>
-      <div class="row">
-        <div class="key sm" data-key="F1">F1</div><div class="key sm" data-key="F2">F2</div>
-        <div class="key sm" data-key="F3">F3</div><div class="key sm" data-key="F4">F4</div>
-        <div class="key sm" data-key="F5">F5</div><div class="key sm" data-key="F6">F6</div>
-      </div>
-      <div class="row">
-        <div class="key sm" data-key="F7">F7</div><div class="key sm" data-key="F8">F8</div>
-        <div class="key sm" data-key="F9">F9</div><div class="key sm" data-key="F10">F10</div>
-        <div class="key sm" data-key="F11">F11</div><div class="key sm" data-key="F12">F12</div>
-      </div>
-      <h4>Keyboard</h4>
-      <div class="row" id="rowDigits"></div>
-      <div class="row" id="row1"></div>
-      <div class="row" id="row2"></div>
-      <div class="row" id="row3"></div>
-      <div class="row">
-        <div class="key sm" data-txt="!">!</div>
-        <div class="key sm" data-txt="@">@</div>
-        <div class="key sm" data-txt="#">#</div>
-        <div class="key sm" data-txt="$">$</div>
-        <div class="key sm" data-txt="%">%</div>
-        <div class="key sm" data-txt="&amp;">&amp;</div>
-        <div class="key sm" data-txt="*">*</div>
-        <div class="key sm" data-txt="-">-</div>
-        <div class="key sm" data-txt="_">_</div>
-        <div class="key sm" data-txt="=">=</div>
-      </div>
-      <div class="row">
-        <div class="key sm" data-txt="/">/</div>
-        <div class="key sm" data-txt="\">\</div>
-        <div class="key sm" data-txt="|">|</div>
-        <div class="key sm" data-txt="~">~</div>
-        <div class="key sm" data-txt="`">`</div>
-        <div class="key sm" data-txt="'">'</div>
-        <div class="key sm" data-txt="&quot;">&quot;</div>
-        <div class="key sm" data-txt=":">:</div>
-        <div class="key sm" data-txt=";">;</div>
-        <div class="key sm" data-txt="?">?</div>
-      </div>
-      <div class="row">
-        <div class="key wide sm" data-key="Tab">Tab</div>
-        <div class="key space" data-txt=" ">space</div>
-        <div class="key enter sm" data-key="Return">⏎</div>
-        <div class="key sm" data-key="Backspace">⌫</div>
-      </div>
-      <h4>Text (IME / CJK)</h4>
-      <input id="ime" autocomplete="off" autocapitalize="off" spellcheck="false"
-             placeholder="type here for IME…" style="width:100%;min-height:34px;background:#00000055;color:#eee;border:1px solid var(--bd);border-radius:8px;padding:6px" />
     </div>
     <script src="app.js"></script>
   </body>

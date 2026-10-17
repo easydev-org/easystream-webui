@@ -535,6 +535,18 @@ buildRow($('rowDigits'), '1234567890'.split(''));
 buildRow($('row1'), 'qwertyuiop'.split(''));
 buildRow($('row2'), 'asdfghjkl'.split(''));
 buildRow($('row3'), 'zxcvbnm'.split(''));
+// Symbol tab: three 10-key rows (same size as every other key).
+buildRow($('rowSym1'), ['!','@','#','$','%','^','&','*','(',')']);
+buildRow($('rowSym2'), ['-','_','=','+','[',']','{','}','\\','|']);
+buildRow($('rowSym3'), ['/','?',':',';','\'','"','~','`','<','>']);
+
+// Keyboard tabs: swap the visible pane (no scrolling).
+document.querySelectorAll('#kbdTabs .tab').forEach((t) => {
+  t.onclick = () => {
+    document.querySelectorAll('#kbdTabs .tab').forEach((x) => x.classList.toggle('on', x === t));
+    document.querySelectorAll('#kbd .pane').forEach((p) => p.classList.toggle('on', p.dataset.pane === t.dataset.tab));
+  };
+});
 
 document.querySelectorAll('#mods .key').forEach((el) => {
   el.onclick = () => { const m = el.dataset.mod; mods[m] = !mods[m]; el.classList.toggle('on', mods[m]); updateSticky(); };
