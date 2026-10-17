@@ -657,7 +657,26 @@ document.querySelectorAll('#kbd .key[data-txt]').forEach((el) => {
     } else { sendText(txt); }
   };
 });
-$('ime').addEventListener('input', (e) => { const v = e.target.value; if (v) { sendText(v); e.target.value = ''; } });
+// IME / CJK: the est TEXT frame can only type ASCII (the daemon maps chars to
+// keycodes). For anything non-ASCII we SET the guest clipboard and press
+// Ctrl+V, which every toolkit honours — the only reliable way to type CJK.
+function typeViaClipboard(text) {
+  clipSetRemote(text);
+  setTimeout(() => {
+    sendKey('Control', 0, true);
+    sendKey('v', 'v'.codePointAt(0), true);
+    sendKey('v', 'v'.codePointAt(0), false);
+    sendKey('Control', 0, false);
+  }, 120);
+}
+$('ime').addEventListener('input', (e) => {
+  const v = e.target.value;
+  if (!v) return;
+  e.target.value = '';
+  // ASCII -> direct TEXT frame; anything else -> clipboard paste.
+  if (/^[\x20-\x7e\r\n\t]*$/.test(v)) sendText(v);
+  else typeViaClipboard(v);
+});
 
 // ── connection ──────────────────────────────────────────────────────────────
 function setState(kind, msg) {
