@@ -14,8 +14,15 @@ const panel = $('panel');
 // macOS encoder emits Level 4.0 = 0x28; a Level-3.1 string made the browser
 // reject 1920x1080 with EncodingError). Level 5.1 is a safe superset.
 const S = { ws: null, dec: null, codec: 'avc1.42E033', w: 0, h: 0, gotKey: false,
-  frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0, viewOnly: false, adec: null, actx: null, again: null, wantControl: false, wantAudio: true, openKbdAfterControl: false, muted: false, anext: 0, aDecoded: 0 };
+  frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0, viewOnly: false, adec: null, actx: null, again: null, wantControl: !!accessToken(), wantAudio: true, openKbdAfterControl: false, muted: false, anext: 0, aDecoded: 0 };
 
+// token comes from the URL (?token=… or #token=…): a viewer link can carry it.
+function accessToken() {
+  const q = new URLSearchParams(location.search);
+  let t = q.get('token');
+  if (!t && location.hash.startsWith('#token=')) t = decodeURIComponent(location.hash.slice(7));
+  return t || '';
+}
 // panDrag = an active view pan (a normal drag, a middle-button drag, or 2+ fingers).
 let panDrag = null;
 
@@ -564,7 +571,11 @@ $('btnRetry').onclick = connect;
 
 // Mode: View (no token) <-> Control (needs the control token). Switching
 // reconnects with/without the token; the daemon answers with AuthOk.
-let controlToken = '';
+//
+// The token may come from the URL (?token=… / #token=…): if present we treat it
+// as the CONTROL token and connect in Control straight away — no prompt. Only
+// when there is no token at all do we ask for one.
+let controlToken = accessToken();
 function setMode(control) {
   S.wantControl = control;
   $('modeView').classList.toggle('on', !control);
@@ -683,15 +694,6 @@ function setState(kind, msg) {
   const el = $('state');
   el.className = 'badge ' + (kind === 'live' ? 'live' : kind === 'err' ? 'err' : 'wait');
   el.textContent = kind === 'live' ? 'live' : kind === 'err' ? (msg || 'error') : 'connecting';
-}
-// token comes from the URL (?token=… or #token=…) so a viewer link can carry
-// it; it is sent via the WebSocket SUBPROTOCOL (not the URL of the ws itself),
-// which keeps it out of the ws request line / logs.
-function accessToken() {
-  const q = new URLSearchParams(location.search);
-  let t = q.get('token');
-  if (!t && location.hash.startsWith('#token=')) t = decodeURIComponent(location.hash.slice(7));
-  return t || '';
 }
 // applyMode hides/disables the input surfaces when the daemon says we are
 // read-only (the AuthOk frame carries the mode).
