@@ -107,6 +107,31 @@ async function localClipRead() {
 async function localClipWrite(t) {
   try { await navigator.clipboard.writeText(t); return true; } catch { return false; }
 }
+// Push+Paste: put the LOCAL clipboard on the guest AND press Ctrl+V there, so
+// it lands in whatever field the guest has focused (one tap on a phone).
+async function pushAndPaste() {
+  const t = await localClipRead();
+  if (!t) { toast('Local clipboard is empty'); return; }
+  lastSynced = t;
+  clipSetRemote(t);
+  setTimeout(() => {
+    sendKey('Control', 0, true);
+    sendKey('v', 'v'.codePointAt(0), true);
+    sendKey('v', 'v'.codePointAt(0), false);
+    sendKey('Control', 0, false);
+  }, 120);
+  toast('Sent to guest and pasted');
+}
+// Copy+Pull: press Ctrl+C in the guest (copy its selection), then pull the
+// guest clipboard into the LOCAL one.
+function copyAndPull() {
+  sendKey('Control', 0, true);
+  sendKey('c', 'c'.codePointAt(0), true);
+  sendKey('c', 'c'.codePointAt(0), false);
+  sendKey('Control', 0, false);
+  setTimeout(() => clipRemoteToLocal(), 250);   // let the guest set its clipboard
+  toast('Copied in guest, pulling to local');
+}
 // Copy: LOCAL selection -> guest clipboard.
 async function clipLocalToRemote() {
   const t = await localClipRead();
@@ -778,7 +803,6 @@ $('ime').addEventListener('keydown', (e) => {
 });
 $('ime').addEventListener('keyup', (e) => e.stopPropagation());
 $('imeSend').onclick = sendImeText;
-$('syncToggle').onclick = () => setSync(!syncOn);
 
 // ── connection ──────────────────────────────────────────────────────────────
 function setState(kind, msg) {
@@ -844,9 +868,10 @@ if ($('audioToggle')) {
 }
 // Clipboard buttons (explicit, in addition to Ctrl+C/V — some browsers gate the
 // async clipboard API behind a user gesture).
-const bc = $('btnCopy'), bp = $('btnPaste');
-if (bc) bc.onclick = () => clipLocalToRemote();
-if (bp) bp.onclick = () => clipRemoteToLocal();
+if ($('syncToggle')) $('syncToggle').onclick = () => setSync(!syncOn);
+const bpp = $('btnPushPaste'), bcp = $('btnCopyPull');
+if (bpp) bpp.onclick = () => pushAndPaste();
+if (bcp) bcp.onclick = () => copyAndPull();
 // Audio: browsers gate playback behind a user gesture, so resume the context on
 // the first interaction and expose a mute toggle.
 function audioResume() { if (S.actx && S.actx.state === 'suspended') S.actx.resume(); }

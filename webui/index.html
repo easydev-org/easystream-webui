@@ -70,7 +70,7 @@
       #kbd .head button { min-height: 26px; padding: 2px 10px; }
       #kbd .sticky-badge { font-size: 10px; color: var(--acc); white-space: nowrap; }
       /* Tab bar */
-      #kbd .modrow { display: grid; grid-template-columns: repeat(4, 1fr);
+      #kbd .modrow { display: grid; grid-template-columns: repeat(6, 1fr);
         gap: 6px; flex: 0 0 auto; height: 40px; }
       #kbd .modrow .key.mod.on { background: var(--acc); color: #000; border-color: var(--acc); }
       #kbd .tabs { display: flex; gap: 4px; flex: 0 0 auto; }
@@ -212,17 +212,10 @@
         </span>
       </div>
       <div class="prow">
-        <label>Clipboard</label>
-        <span>
-          <button id="btnCopy" title="push local clipboard to guest">⧉↑</button>
-          <button id="btnPaste" title="pull guest clipboard to local">⧉↓</button>
-          <button id="syncToggle" class="toggle" title="auto-sync the clipboard both ways">Sync</button>
-        </span>
-      </div>
-      <div class="prow">
         <label>Actions</label>
         <span>
           <button id="btnKbd" title="keyboard">⌨</button>
+          <button id="syncToggle" class="toggle" title="auto-sync the clipboard both ways">Sync</button>
           <button id="btnFs" title="fullscreen">⛶</button>
           <button id="btnRetry" title="reconnect">↻</button>
         </span>
@@ -249,6 +242,9 @@
         <div class="key mod" data-mod="Alt">Alt</div>
         <div class="key mod" data-mod="Shift">Shift</div>
         <div class="key mod" data-mod="Meta">Meta</div>
+        <!-- clipboard: push local + paste, and copy + pull remote -->
+        <div class="key" id="btnPushPaste" title="copy the LOCAL clipboard to the guest and paste it there">⇥⇩</div>
+        <div class="key" id="btnCopyPull" title="send Ctrl+C to the guest, then copy its clipboard locally">⇤⇧</div>
       </div>
       <div class="tabs" id="kbdTabs">
         <button class="tab on" data-tab="letters">ABC</button>
