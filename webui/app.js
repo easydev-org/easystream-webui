@@ -85,8 +85,22 @@ function sendText(s) { send(frame(T.TEXT, new TextEncoder().encode(s))); }
 // ── clipboard ───────────────────────────────────────────────────────────────
 // The browser clipboard is the LOCAL one (navigator.clipboard); the guest's is
 // the remote one. We bridge them on demand and on Ctrl+C / Ctrl+V.
-function clipSetRemote(text) { send(frame(T.CLIP_SET, new TextEncoder().encode(text))); }
-function clipGetRemote() { send(frame(T.CLIP_GET, new Uint8Array(0))); }
+let clipId = 1;
+// est spec: 0x30 ClipGet = u32 id ; 0x32 ClipSet = u32 id, u32 len, text.
+function clipSetRemote(text) {
+  const t = new TextEncoder().encode(text);
+  const b = new Uint8Array(4 + 4 + t.length);
+  const d = new DataView(b.buffer);
+  d.setUint32(0, clipId++, false);
+  d.setUint32(4, t.length, false);
+  b.set(t, 8);
+  send(frame(T.CLIP_SET, b));
+}
+function clipGetRemote() {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, clipId++, false);
+  send(frame(T.CLIP_GET, b));
+}
 async function localClipRead() {
   try { return await navigator.clipboard.readText(); } catch { return ''; }
 }
@@ -389,12 +403,17 @@ cv.addEventListener('pointerdown', (e) => {
     return;
   }
 
-  // touch
+  // touch: ONE finger drives the GUEST (tap = click, drag = swipe/scroll in the
+  // guest). Only TWO or more fingers move the VIEW (pinch zoom + pan).
   if (pts.size === 1) {
-    press = { x: e.clientX, y: e.clientY, t0: Date.now(), pointerId: e.pointerId,
-              type: 'touch', shift: false, guest: false };
+    const [x, y] = toSource(e.clientX, e.clientY);
+    sendMove(x, y);
+    touch = { startX: e.clientX, startY: e.clientY, moved: false, down: false, t0: Date.now() };
   } else {
-    press = null;                      // a 2nd finger cancels the pending click
+    // a 2nd finger arrives: cancel the single-finger guest touch, start a view
+    // gesture instead.
+    if (touch) { if (touch.down) sendButton(1, false); touch = null; }
+    press = null;
     beginGest();
   }
 });
@@ -423,7 +442,15 @@ cv.addEventListener('pointermove', (e) => {
     return;
   }
 
-  // A pending single-pointer press: decide what it becomes once it moves.
+  // Single FINGER: drive the guest (drag = swipe/scroll), never the view.
+  if (e.pointerType !== 'mouse' && touch) {
+    const dx = e.clientX - touch.startX, dy = e.clientY - touch.startY;
+    if (!touch.moved && Math.hypot(dx, dy) > 6) { touch.moved = true; sendButton(1, true); touch.down = true; }
+    if (touch.moved) { const [x, y] = toSource(e.clientX, e.clientY); sendMove(x, y); }
+    return;
+  }
+
+  // A pending single MOUSE press: decide what it becomes once it moves.
   if (press && press.pointerId === e.pointerId) {
     const dx = e.clientX - press.x, dy = e.clientY - press.y;
     const th = e.pointerType === 'mouse' ? 4 : 8;
@@ -455,16 +482,27 @@ function endPointer(e) {
   if (!pts.has(e.pointerId)) return;
   pts.delete(e.pointerId);
 
-  if (press && press.pointerId === e.pointerId) {
-    if (press.guest) {
-      sendButton(1, false);            // finish a Shift drag
+  // Single FINGER finished: tap = click, long-press = right click, drag already
+  // sent button-down/moves above.
+  if (touch && e.pointerType !== 'mouse') {
+    if (touch.moved) {
+      if (touch.down) sendButton(1, false);
     } else {
-      // No movement -> a CLICK at the release point.
       const [x, y] = toSource(e.clientX, e.clientY);
       sendMove(x, y);
-      const held = Date.now() - press.t0;
-      const btn = (press.type === 'touch' && held >= 600) ? 3 : 1;  // long-press = right
+      const held = Date.now() - touch.t0;
+      const btn = held >= 600 ? 3 : 1;   // long-press = right click
       sendButton(btn, true); sendButton(btn, false);
+    }
+    touch = null;
+  }
+  if (press && press.pointerId === e.pointerId) {
+    if (press.guest) {
+      sendButton(1, false);            // finish a Shift drag (mouse)
+    } else {
+      const [x, y] = toSource(e.clientX, e.clientY);
+      sendMove(x, y);
+      sendButton(1, true); sendButton(1, false);
     }
     press = null;
   }
@@ -680,14 +718,24 @@ function typeViaClipboard(text) {
     sendKey('Control', 0, false);
   }, 120);
 }
-$('ime').addEventListener('input', (e) => {
-  const v = e.target.value;
+// IME / CJK box: keep the text VISIBLE while typing (the old code wiped the
+// field on every keystroke, so nothing ever appeared). Press Enter (or the Send
+// button) to type it into the guest, then the field clears.
+function sendImeText() {
+  const el = $('ime');
+  const v = el.value;
   if (!v) return;
-  e.target.value = '';
+  el.value = '';
   // ASCII -> direct TEXT frame; anything else -> clipboard paste.
   if (/^[\x20-\x7e\r\n\t]*$/.test(v)) sendText(v);
   else typeViaClipboard(v);
+}
+$('ime').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendImeText(); }
+  e.stopPropagation();   // do not let the physical-keyboard handler double-type
 });
+$('ime').addEventListener('keyup', (e) => e.stopPropagation());
+$('imeSend').onclick = sendImeText;
 
 // ── connection ──────────────────────────────────────────────────────────────
 function setState(kind, msg) {

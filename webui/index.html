@@ -113,6 +113,7 @@
       #kbd .g10.grow .key:nth-child(2) { grid-column: span 6; }
       #kbd .g10.grow .key:nth-child(3) { grid-column: span 2; }
       #kbd .pane .hint { font-size: 11px; color: #999; }
+      #kbd .sendrow { display: grid; grid-template-columns: 1fr; flex: 0 0 auto; height: 40px; }
       #kbd #ime { width: 100%; min-height: 40px; background: #00000055; color: #eee;
         border: 1px solid var(--bd); border-radius: 8px; padding: 8px; font-size: 15px; }
       #zoom {
@@ -325,8 +326,9 @@
         <!-- IME / CJK text entry -->
         <div class="pane" data-pane="ime">
           <input id="ime" autocomplete="off" autocapitalize="off" spellcheck="false"
-                 placeholder="type here for IME / CJK…" />
-          <div class="hint">Text typed here is sent as one TEXT frame.</div>
+                 placeholder="type here, then Enter / Send…" />
+          <div class="sendrow"><div class="key" id="imeSend">Send</div></div>
+          <div class="hint">ASCII is typed directly; other scripts are pasted (clipboard + Ctrl+V).</div>
         </div>
       </div>
     </div>
