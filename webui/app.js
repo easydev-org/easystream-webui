@@ -14,7 +14,7 @@ const panel = $('panel');
 // macOS encoder emits Level 4.0 = 0x28; a Level-3.1 string made the browser
 // reject 1920x1080 with EncodingError). Level 5.1 is a safe superset.
 const S = { ws: null, dec: null, codec: 'avc1.42E033', w: 0, h: 0, gotKey: false,
-  frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0, viewOnly: false, adec: null, actx: null, again: null, wantControl: false, wantAudio: false, muted: false, anext: 0, aDecoded: 0 };
+  frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0, viewOnly: false, adec: null, actx: null, again: null, wantControl: false, wantAudio: true, muted: false, anext: 0, aDecoded: 0 };
 
 // offscreen holds the latest frame at native size so zoom/pan repaint instantly.
 const off = document.createElement('canvas');
@@ -623,6 +623,11 @@ function close() {
 }
 addEventListener('resize', resize);
 addEventListener('orientationchange', () => setTimeout(resize, 150));
+// Audio is ON by default: reflect it in the toggle before connecting.
+if ($('audioToggle')) {
+  $('audioToggle').textContent = S.wantAudio ? 'On' : 'Off';
+  $('audioToggle').classList.toggle('on', S.wantAudio);
+}
 // Clipboard buttons (explicit, in addition to Ctrl+C/V — some browsers gate the
 // async clipboard API behind a user gesture).
 const bc = $('btnCopy'), bp = $('btnPaste');
