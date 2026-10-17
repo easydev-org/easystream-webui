@@ -110,11 +110,53 @@ async function localClipWrite(t) {
 // Copy: LOCAL selection -> guest clipboard.
 async function clipLocalToRemote() {
   const t = await localClipRead();
-  if (t) clipSetRemote(t);
+  if (t) { lastSynced = t; clipSetRemote(t); }
 }
-// Paste: guest clipboard -> LOCAL clipboard (then the user pastes in the guest
-// via Ctrl+V, which we forward as usual).
+// Paste: guest clipboard -> LOCAL clipboard.
 function clipRemoteToLocal() { clipGetRemote(); }
+
+// ── bidirectional clipboard sync (opt-in) ───────────────────────────────────
+// The browser has no clipboard-change event (verified: 'clipboardchange' is not
+// supported), so we POLL. `lastSynced` remembers the last value we propagated
+// in EITHER direction, so a value travels exactly once and cannot bounce
+// back and forth.
+let syncOn = false;
+let syncTimer = null;
+let lastSynced = '';
+const SYNC_MS = 1500;
+
+function setSync(on) {
+  syncOn = on;
+  if ($('syncToggle')) { $('syncToggle').textContent = on ? 'On' : 'Off'; $('syncToggle').classList.toggle('on', on); }
+  if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
+  if (on) {
+    toast('Clipboard sync ON — it overwrites the clipboard on both sides');
+    syncTick();
+    syncTimer = setInterval(syncTick, SYNC_MS);
+  }
+}
+async function syncTick() {
+  if (!syncOn || S.ws?.readyState !== WebSocket.OPEN) return;
+  // 1) LOCAL -> guest. readText() needs a focused, visible document.
+  if (!document.hidden && document.hasFocus()) {
+    const t = await localClipRead();
+    if (t && t !== lastSynced) { lastSynced = t; clipSetRemote(t); return; }
+  }
+  // 2) guest -> LOCAL (the answer arrives as ClipData).
+  clipGetRemote();
+}
+// Called when a ClipData frame arrives (from either a manual pull or the sync).
+function onClipData(text) {
+  if (syncOn) {
+    if (text && text !== lastSynced) { lastSynced = text; localClipWrite(text); }
+  } else {
+    localClipWrite(text);
+  }
+}
+// Re-sync the moment the page regains focus (the clipboard may have changed
+// while we were away, which the poll could not see).
+addEventListener('focus', () => { if (syncOn) syncTick(); });
+document.addEventListener('visibilitychange', () => { if (syncOn && !document.hidden) syncTick(); });
 
 
 // ── inbound ─────────────────────────────────────────────────────────────────
@@ -137,7 +179,7 @@ function onBytes(chunk) {
       // u32 id, u32 len, text[len]
       const len = new DataView(body.buffer, body.byteOffset).getUint32(4, false);
       const txt = new TextDecoder().decode(body.slice(8, 8 + len));
-      localClipWrite(txt);
+      onClipData(txt);
     } else if (type === 0x04) { // AuthOk: body[0] = 0 view / 1 control / 0xFF fail
       if (body[0] === 0xFF) { setState('err', 'auth failed'); return; }
       applyMode(body[0] === 0);
@@ -736,6 +778,7 @@ $('ime').addEventListener('keydown', (e) => {
 });
 $('ime').addEventListener('keyup', (e) => e.stopPropagation());
 $('imeSend').onclick = sendImeText;
+$('syncToggle').onclick = () => setSync(!syncOn);
 
 // ── connection ──────────────────────────────────────────────────────────────
 function setState(kind, msg) {
