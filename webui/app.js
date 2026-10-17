@@ -230,7 +230,11 @@ function drawRect() {
 }
 function clampPan() {
   const { vw, vh } = vp(); const r = drawRect();
-  const maxX = Math.max(0, (r.width - vw) / 2), maxY = Math.max(0, (r.height - vh) / 2);
+  // The view may be positioned ANYWHERE inside the viewport:
+  //   * image LARGER than the viewport  -> scroll to any edge (see the overflow)
+  //   * image SMALLER than the viewport -> still movable, so it can be pushed
+  //     flush to the top/bottom/left/right instead of being locked centred.
+  const maxX = Math.abs(vw - r.width) / 2, maxY = Math.abs(vh - r.height) / 2;
   S.panX = Math.max(-maxX, Math.min(maxX, S.panX));
   S.panY = Math.max(-maxY, Math.min(maxY, S.panY));
 }
