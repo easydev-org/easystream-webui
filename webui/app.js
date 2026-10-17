@@ -3,7 +3,7 @@
 
 const T = { HELLO: 0x01, VIDEO: 0x02, AUTH_OK: 0x04, AUDIO: 0x05,
   MOVE: 0x10, BUTTON: 0x11, SCROLL: 0x12, KEY: 0x13, TEXT: 0x14,
-  AUDIO_REQ: 0x06, CLIP_GET: 0x30, CLIP_DATA: 0x31, CLIP_SET: 0x32 };
+  AUDIO_REQ: 0x06, AUDIO_OFF: 0x07, CLIP_GET: 0x30, CLIP_DATA: 0x31, CLIP_SET: 0x32 };
 
 const $ = (id) => document.getElementById(id);
 const cv = $('screen');
@@ -14,7 +14,7 @@ const panel = $('panel');
 // macOS encoder emits Level 4.0 = 0x28; a Level-3.1 string made the browser
 // reject 1920x1080 with EncodingError). Level 5.1 is a safe superset.
 const S = { ws: null, dec: null, codec: 'avc1.42E033', w: 0, h: 0, gotKey: false,
-  frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0, viewOnly: false, adec: null, actx: null, again: null, wantControl: false, wantAudio: false };
+  frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0, viewOnly: false, adec: null, actx: null, again: null, wantControl: false, wantAudio: false, muted: false, anext: 0, aDecoded: 0 };
 
 // offscreen holds the latest frame at native size so zoom/pan repaint instantly.
 const off = document.createElement('canvas');
@@ -121,6 +121,12 @@ function onBytes(chunk) {
       if (body[1] === 1) S.codec = 'avc1.42E033';
       S.w = (body[2] << 8) | body[3]; S.h = (body[4] << 8) | body[5];
       off.width = S.w || 1; off.height = S.h || 1;
+      // Audio block (v1 extension): present@7, codec@8, rate@9..13, ch@13, ms@14.
+      if (body.length >= 15 && body[7] === 1 && S.wantAudio) {
+        S.aRate = ((body[9] << 24) | (body[10] << 16) | (body[11] << 8) | body[12]) >>> 0;
+        S.aCh = body[13]; S.aMs = body[14];
+        startAudio();
+      }
       startDecoder(); resize();
     } else if (type === T.VIDEO) {
       decodeVideo(body);
@@ -493,8 +499,20 @@ $('audioToggle').onclick = () => {
   S.wantAudio = !S.wantAudio;
   $('audioToggle').textContent = S.wantAudio ? 'On' : 'Off';
   $('audioToggle').classList.toggle('on', S.wantAudio);
-  if (S.wantAudio) audioResume();
-  connect(); // re-handshake so the daemon starts/!stops the audio stream
+  if (S.wantAudio) {
+    audioResume();
+    // Ask the daemon to start audio on THIS connection (no reconnect: the
+    // video stream is untouched). Also bring up the local decoder NOW — Hello
+    // (which carries the audio params) was already parsed at connect time.
+    send(frame(T.AUDIO_REQ, new Uint8Array(0)));
+    startAudio();
+  } else {
+    // Stop audio on this connection without dropping the video.
+    send(frame(T.AUDIO_OFF, new Uint8Array(0)));
+    if (S.adec) { try { S.adec.close(); } catch {} S.adec = null; }
+    if (S.actx) { try { S.actx.close(); } catch {} S.actx = null; S.gain = null; }
+    S.anext = 0;
+  }
 };
 // Menu button toggles the settings panel; clicking outside closes it.
 $('btnMenu').onclick = (e) => { e.stopPropagation(); panel.classList.toggle('show'); };
@@ -616,10 +634,9 @@ function audioResume() { if (S.actx && S.actx.state === 'suspended') S.actx.resu
 const bm = $('btnMute');
 if (bm) bm.onclick = () => {
   audioResume();
-  if (!S.actx) return;
-  const on = !S.muted; S.muted = on;
-  if (S.gain) S.gain.gain.value = on ? 0 : 1;
-  bm.textContent = on ? '🔇' : '🔊';
+  S.muted = !S.muted;                 // toggle from the (initialised) state
+  if (S.gain) S.gain.gain.value = S.muted ? 0 : 1;
+  bm.textContent = S.muted ? '🔇' : '🔊';
 };
 document.addEventListener('pointerdown', audioResume, { once: false });
 resize();
