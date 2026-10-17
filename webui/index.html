@@ -8,7 +8,7 @@
     <style>
       :root {
         --bar: #101010d9; --fg: #eee; --bd: #333; --acc: #fab283; --screenbg: #4a4a4a;
-        --ok: #4ade80; --err: #f87171; --kbdw: min(360px, 88vw);
+        --ok: #4ade80; --err: #f87171; --kbdw: min(360px, 88vw); --kbdh: 46vh;
       }
       * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
       html, body {
@@ -17,7 +17,8 @@
         overscroll-behavior: none;
       }
       #screen {
-        position: fixed; inset: 0; width: 100%; height: 100%; display: block;
+        position: fixed; left: 0; top: 0; width: 100%; height: 100%; display: block;
+        transition: left .18s ease, bottom .18s ease;
         cursor: none; touch-action: none; outline: none;
       }
       #bar {
@@ -69,7 +70,10 @@
       #kbd .head button { min-height: 26px; padding: 2px 10px; }
       #kbd .sticky-badge { font-size: 10px; color: var(--acc); white-space: nowrap; }
       /* Tab bar */
-      #kbd .tabs { display: flex; gap: 4px; }
+      #kbd .modrow { display: grid; grid-template-columns: repeat(4, 1fr);
+        gap: 6px; flex: 0 0 auto; height: 40px; }
+      #kbd .modrow .key.mod.on { background: var(--acc); color: #000; border-color: var(--acc); }
+      #kbd .tabs { display: flex; gap: 4px; flex: 0 0 auto; }
       #kbd .tabs .tab {
         flex: 1 1 0; min-width: 0; height: 32px; font-size: 12px;
         background: #ffffff10; color: var(--fg); border: 1px solid var(--bd);
@@ -114,10 +118,12 @@
       #zoom {
         position: fixed; right: 12px; z-index: 25;
         bottom: calc(12px + env(safe-area-inset-bottom));
+        transition: bottom .18s ease;
         display: flex; flex-direction: column; gap: 6px;
       }
       #zoom button { width: 44px; height: 44px; padding: 0; font-size: 18px;
         background: var(--bar); backdrop-filter: blur(8px); }
+      #zoom button.on { background: var(--acc); color: #000; border-color: var(--acc); }
       #zoomLabel { text-align: center; font-size: 10px; color: #bbb; }
       #ime { position: fixed; left: -9999px; top: 0; width: 10px; height: 10px; opacity: 0; }
       @media (max-width: 640px) {
@@ -126,7 +132,7 @@
            termux/noVNC-mobile pattern. A left drawer would cover the screen. */
         #kbd {
           left: 0; right: 0; top: auto; bottom: 0; width: auto;
-          height: 46vh; max-height: 46vh; border-right: none; border-top: 1px solid var(--bd);
+          height: var(--kbdh); max-height: var(--kbdh); border-right: none; border-top: 1px solid var(--bd);
           border-radius: 14px 14px 0 0;
           transform: translateY(102%);
           box-shadow: 0 -8px 24px #000a;
@@ -166,6 +172,15 @@
       #panel .segbtn:last-child { border-radius: 0 8px 8px 0; }
       #panel .segbtn.on { background: var(--acc); color: #000; border-color: var(--acc); }
       #panel .toggle.on { background: var(--acc); color: #000; border-color: var(--acc); }
+      /* When the keyboard is open the canvas shrinks so the screen is never
+         hidden behind it (wide: drawer on the LEFT; narrow: sheet at the BOTTOM). */
+      body.kbd-open #screen { height: calc(100% - var(--kbdh, 46vh)); }
+      /* keep the zoom/pan controls above the keyboard sheet */
+      body.kbd-open #zoom { bottom: calc(var(--kbdh, 46vh) + 12px); }
+      body.kbd-open #kbdToggle { bottom: calc(var(--kbdh, 46vh) + 12px); }
+      @media (min-width: 641px) {
+        body.kbd-open #screen { left: var(--kbdw); width: calc(100% - var(--kbdw)); }
+      }
       #toast { position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom));
         transform: translateX(-50%) translateY(20px); z-index: 60;
         background: #000000dd; color: #fff; border: 1px solid var(--bd);
@@ -214,6 +229,7 @@
     </div>
     <button id="kbdToggle" title="keyboard">⌨</button>
     <div id="zoom">
+      <button id="zPan" title="pan mode: drag to move the view">🖐</button>
       <button id="zIn" title="zoom in">＋</button>
       <button id="zOut" title="zoom out">－</button>
       <button id="zFit" title="fit" style="font-size:12px">Fit</button>
@@ -225,6 +241,14 @@
         <b>Keyboard</b>
         <span class="sticky-badge" id="stickyBadge"></span>
         <button id="kbdHide">✕</button>
+      </div>
+      <!-- Modifiers are ALWAYS visible, on every tab (they are latched, so the
+           next key press combines with them). -->
+      <div class="modrow" id="mods">
+        <div class="key mod" data-mod="Control">Ctrl</div>
+        <div class="key mod" data-mod="Alt">Alt</div>
+        <div class="key mod" data-mod="Shift">Shift</div>
+        <div class="key mod" data-mod="Meta">Meta</div>
       </div>
       <div class="tabs" id="kbdTabs">
         <button class="tab on" data-tab="letters">ABC</button>
@@ -249,12 +273,6 @@
         </div>
         <!-- Edit: modifiers + editing keys, all the same size -->
         <div class="pane" data-pane="edit">
-          <div class="g4">
-            <div class="key mod" data-mod="Control">Ctrl</div>
-            <div class="key mod" data-mod="Alt">Alt</div>
-            <div class="key mod" data-mod="Shift">Shift</div>
-            <div class="key mod" data-mod="Meta">Meta</div>
-          </div>
           <div class="g4">
             <div class="key" data-key="Escape">Esc</div>
             <div class="key" data-key="Tab">Tab</div>

@@ -16,6 +16,10 @@ const panel = $('panel');
 const S = { ws: null, dec: null, codec: 'avc1.42E033', w: 0, h: 0, gotKey: false,
   frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0, viewOnly: false, adec: null, actx: null, again: null, wantControl: false, wantAudio: true, openKbdAfterControl: false, muted: false, anext: 0, aDecoded: 0 };
 
+// View pan: panMode = HAND TOOL (any drag pans the view); panDrag = an active pan.
+let panMode = false;
+let panDrag = null;
+
 // offscreen holds the latest frame at native size so zoom/pan repaint instantly.
 const off = document.createElement('canvas');
 const offCtx = off.getContext('2d');
@@ -294,6 +298,12 @@ function oneToOne() {
   const dpr = window.devicePixelRatio || 1;
   zoomTo(1 / (fit * dpr));
 }
+$('zPan').onclick = () => {
+  panMode = !panMode;
+  $('zPan').classList.toggle('on', panMode);
+  cv.style.cursor = panMode ? 'grab' : '';
+  toast(panMode ? 'Pan mode ON — drag to move the view' : 'Pan mode off');
+};
 $('zIn').onclick = () => zoomBy(1.25);
 $('zOut').onclick = () => zoomBy(0.8);
 $('zFit').onclick = fitView;
@@ -348,7 +358,20 @@ cv.addEventListener('pointerdown', (e) => {
   try { cv.setPointerCapture(e.pointerId); } catch {}
   pts.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
   cv.focus({ preventScroll: true });
+  if (panMode) {
+    // Hand tool: ANY pointer (mouse or single finger) drags the view.
+    panDrag = { x: e.clientX, y: e.clientY, panX: S.panX, panY: S.panY };
+    cv.style.cursor = 'grabbing';
+    return;
+  }
   if (e.pointerType === 'mouse') {
+    if (e.button === 1 || e.shiftKey) {
+      // MIDDLE button (or Shift+left) PANS the view instead of reaching the
+      // guest: the left button must stay a real click/drag for the guest.
+      panDrag = { x: e.clientX, y: e.clientY, panX: S.panX, panY: S.panY };
+      e.preventDefault();
+      return;
+    }
     const [x, y] = toSource(e.clientX, e.clientY); sendMove(x, y);
     sendButton(e.button === 2 ? 3 : e.button === 1 ? 2 : 1, true);
   } else if (pts.size === 1) {
@@ -369,6 +392,12 @@ cv.addEventListener('pointermove', (e) => {
     return;
   }
   pts.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
+  if (panDrag) {
+    S.panX = panDrag.panX + (e.clientX - panDrag.x);
+    S.panY = panDrag.panY + (e.clientY - panDrag.y);
+    clampPan(); paint();
+    return;
+  }
   if (pts.size >= 2) {
     if (!gest) beginGest();
     const c = pCentroid();
@@ -393,6 +422,7 @@ cv.addEventListener('pointermove', (e) => {
 });
 
 function endPointer(e) {
+  if (panDrag) { panDrag = null; cv.style.cursor = panMode ? 'grab' : ''; if (!pts.has(e.pointerId)) return; }
   if (!pts.has(e.pointerId)) return;
   pts.delete(e.pointerId);
   if (e.pointerType === 'mouse') {
@@ -482,7 +512,10 @@ function toggleKbd(show) {
     }
     return;
   }
-  kbd.classList.toggle('show', show ?? !kbd.classList.contains('show'));
+  const on = show ?? !kbd.classList.contains('show');
+  kbd.classList.toggle('show', on);
+  document.body.classList.toggle('kbd-open', on);
+  resize();   // the canvas grew/shrank: refit
 }
 // toast shows a transient message (no dependency).
 let toastTimer = null;
