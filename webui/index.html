@@ -166,6 +166,12 @@
       #panel .segbtn:last-child { border-radius: 0 8px 8px 0; }
       #panel .segbtn.on { background: var(--acc); color: #000; border-color: var(--acc); }
       #panel .toggle.on { background: var(--acc); color: #000; border-color: var(--acc); }
+      #toast { position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom));
+        transform: translateX(-50%) translateY(20px); z-index: 60;
+        background: #000000dd; color: #fff; border: 1px solid var(--bd);
+        border-radius: 10px; padding: 10px 14px; font-size: 13px; max-width: 84vw;
+        opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; }
+      #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
     </style>
   </head>
   <body>

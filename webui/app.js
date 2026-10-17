@@ -14,7 +14,7 @@ const panel = $('panel');
 // macOS encoder emits Level 4.0 = 0x28; a Level-3.1 string made the browser
 // reject 1920x1080 with EncodingError). Level 5.1 is a safe superset.
 const S = { ws: null, dec: null, codec: 'avc1.42E033', w: 0, h: 0, gotKey: false,
-  frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0, viewOnly: false, adec: null, actx: null, again: null, wantControl: false, wantAudio: true, muted: false, anext: 0, aDecoded: 0 };
+  frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0, viewOnly: false, adec: null, actx: null, again: null, wantControl: false, wantAudio: true, openKbdAfterControl: false, muted: false, anext: 0, aDecoded: 0 };
 
 // offscreen holds the latest frame at native size so zoom/pan repaint instantly.
 const off = document.createElement('canvas');
@@ -471,7 +471,33 @@ function updateSticky() {
   const on = Object.entries(mods).filter(([, v]) => v).map(([k]) => k);
   $('stickyBadge').textContent = on.length ? 'latched: ' + on.join(' + ') : '';
 }
-function toggleKbd(show) { kbd.classList.toggle('show', show ?? !kbd.classList.contains('show')); }
+function toggleKbd(show) {
+  // In View (read-only) mode the keyboard is disabled: instead of silently
+  // doing nothing, tell the user and offer to switch to Control.
+  if (S.viewOnly) {
+    toast('Keyboard needs Control mode. Switch?');
+    if (confirm('The keyboard injects input, which requires CONTROL mode.\nSwitch to Control now?')) {
+      S.openKbdAfterControl = true;   // open it once we are in Control
+      setMode(true);
+    }
+    return;
+  }
+  kbd.classList.toggle('show', show ?? !kbd.classList.contains('show'));
+}
+// toast shows a transient message (no dependency).
+let toastTimer = null;
+function toast(msg) {
+  let el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+}
 $('kbdToggle').onclick = () => toggleKbd();
 $('kbdHide').onclick = () => toggleKbd(false);
 $('btnKbd').onclick = () => toggleKbd();
@@ -602,6 +628,12 @@ function applyMode(viewOnly) {
   if (kb) kb.style.display = viewOnly ? 'none' : '';
   if (ime) ime.disabled = viewOnly;
   if (viewOnly) { const k = $('kbd'); if (k) k.classList.remove('show'); }
+  // The user asked for the keyboard while in View mode: open it now that we
+  // are in Control.
+  if (!viewOnly && S.openKbdAfterControl) {
+    S.openKbdAfterControl = false;
+    toggleKbd(true);
+  }
 }
 function connect() {
   close();
