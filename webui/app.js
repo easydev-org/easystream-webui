@@ -383,16 +383,9 @@ function srcUV(clientX, clientY) {
 }
 function zoomBy(f, cx, cy) { zoomTo(S.userScale * f, cx, cy); }
 function fitView() { S.userScale = 1; S.panX = 0; S.panY = 0; clampPan(); paint(); }
-function oneToOne() {
-  const { vw, vh } = vp(); const sw = S.w || 1, sh = S.h || 1;
-  const fit = Math.min(vw / sw, vh / sh);
-  const dpr = window.devicePixelRatio || 1;
-  zoomTo(1 / (fit * dpr));
-}
 $('zIn').onclick = () => zoomBy(1.25);
 $('zOut').onclick = () => zoomBy(0.8);
 $('zFit').onclick = fitView;
-$('zOne').onclick = oneToOne;
 
 // ── input ───────────────────────────────────────────────────────────────────
 function toSource(clientX, clientY) {
@@ -439,12 +432,17 @@ function beginGest() {
   if (touch) { if (touch.down) sendButton(1, false); touch = null; }
 }
 
-// ── pointer: DEFAULT DRAG PANS THE VIEW ─────────────────────────────────────
-// A press that never moves is a CLICK; once it moves it becomes a PAN (or, with
-// Shift, a drag inside the guest). Nothing is sent to the guest on pointerdown,
-// which is what lets a drag pan instead of selecting in the guest.
-//   mouse : drag = pan view ; Shift+drag = drag in guest ; click = click
-//   touch : 1-finger drag = pan view ; tap = click ; long-press = right click
+// ── pointer: DEFAULT DRAG GOES TO THE GUEST ─────────────────────────────────
+// A press that never moves is a CLICK; once it moves it becomes a DRAG INSIDE
+// THE GUEST, and Shift makes it pan the view instead. Nothing is sent to the
+// guest on pointerdown, so a press can still be decided after the fact.
+//
+// It used to be the other way round (drag = pan), which made every attempt to
+// move a window or select text inside the guest slide the whole picture. Dragging
+// in the guest is the common case; moving the viewport is not.
+//   mouse : drag = drag in guest ; Shift+drag = pan view ; click = click
+//           middle-drag = pan view ; right click = right click in guest
+//   touch : 1-finger drag = drag in guest ; tap = click ; long-press = right click
 //   2/3 fingers : pinch zoom + pan (unchanged)
 let press = null;   // { x, y, t0, pointerId, type, shift, guest }
 
@@ -522,15 +520,22 @@ cv.addEventListener('pointermove', (e) => {
     const dx = e.clientX - press.x, dy = e.clientY - press.y;
     const th = e.pointerType === 'mouse' ? 4 : 8;
     if (!press.guest && Math.hypot(dx, dy) > th) {
-      if (press.shift) {               // Shift: drag INSIDE the guest
-        const [sx, sy] = toSource(press.x, press.y);
-        sendMove(sx, sy); sendButton(1, true);
-        press.guest = true;
-      } else {                         // otherwise: pan the view
+      // DEFAULT IS DRAG IN THE GUEST. Dragging inside the desktop is what people
+      // mean by "drag" (move a window, select text, drag a slider); panning the
+      // view is the occasional action, so it moves behind a modifier. The
+      // previous mapping had this backwards and every attempt to drag something
+      // in the guest slid the whole picture instead.
+      //
+      // Shift+drag (and middle-button drag, handled on pointerdown) pans the view.
+      if (press.shift) {               // Shift: pan the VIEW
         panDrag = { x: e.clientX, y: e.clientY, panX: S.panX, panY: S.panY };
         cv.style.cursor = 'grabbing';
         press = null;
         return;
+      } else {                         // otherwise: drag INSIDE the guest
+        const [sx, sy] = toSource(press.x, press.y);
+        sendMove(sx, sy); sendButton(1, true);
+        press.guest = true;
       }
     }
     if (press && press.guest) {
@@ -637,6 +642,29 @@ const mods = { Control: false, Alt: false, Shift: false, Meta: false };
 function updateSticky() {
   const on = Object.entries(mods).filter(([, v]) => v).map(([k]) => k);
   $('stickyBadge').textContent = on.length ? 'latched: ' + on.join(' + ') : '';
+  reflectShift();
+}
+
+// reflectShift repaints the letter and symbol keycaps for the latched Shift.
+//
+// Shift is a STICKY modifier here (tap it, then tap one key), so without this the
+// keyboard gives no feedback at all: the user taps Shift, sees nothing change, and
+// cannot tell whether the next letter will be uppercase. Every on-screen keyboard
+// shows the shifted legend, so this one does too — letters go uppercase and the
+// digit row swaps to its symbols, exactly like a hardware keycap.
+const SHIFTED_DIGITS = { '1':'!','2':'@','3':'#','4':'$','5':'%','6':'^','7':'&','8':'*','9':'(','0':')' };
+function reflectShift() {
+  const up = !!mods.Shift;
+  for (const el of document.querySelectorAll('#kbd .key[data-txt]')) {
+    const base = el.dataset.base || el.dataset.txt;
+    el.dataset.base = base;                 // remember the unshifted legend once
+    if (base.length !== 1) continue;        // space etc. stay as they are
+    const shifted = SHIFTED_DIGITS[base] ||
+      (base !== base.toUpperCase() ? base.toUpperCase() : base);
+    const want = up ? shifted : base;
+    el.textContent = want;
+    el.dataset.txt = want;                  // what a tap will actually type
+  }
 }
 function toggleKbd(show) {
   // In View (read-only) mode the keyboard is disabled: instead of silently
@@ -671,8 +699,79 @@ function toast(msg) {
 $('kbdToggle').onclick = () => toggleKbd();
 $('kbdHide').onclick = () => toggleKbd(false);
 $('btnKbd').onclick = () => toggleKbd();
-$('btnFs').onclick = () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.(); };
+// ── fullscreen + keyboard lock ──────────────────────────────────────────────
+// Fullscreen is not just a bigger view: it is the only state in which a page may
+// CAPTURE browser-reserved keys. navigator.keyboard.lock() (Chrome/Edge 96+,
+// fullscreen only) makes Ctrl+W, Ctrl+T, Ctrl+Tab, Ctrl+N and friends arrive as
+// ordinary keydown events. Without it those combinations are unfixable from
+// JavaScript — they never reach the page — so a remote desktop that wants the
+// guest's own shortcuts cannot work outside fullscreen.
+//
+// Firefox and Safari do not implement the API. There the top-row and Ctrl/Alt
+// combinations we CAN intercept still work (see the keydown handler), and
+// Ctrl+W/Ctrl+T simply cannot be forwarded; we say so rather than pretend.
+async function enterFullscreen() {
+  const el = document.documentElement;
+  if (!document.fullscreenElement) await el.requestFullscreen?.();
+  if (navigator.keyboard?.lock) {
+    try {
+      // No argument = lock every key the browser reserves.
+      await navigator.keyboard.lock();
+      toast('keyboard locked: browser shortcuts now go to the guest');
+    } catch (e) {
+      console.warn('keyboard.lock failed', e);
+      toast('fullscreen on; keyboard lock unavailable');
+    }
+  } else {
+    toast('fullscreen on; this browser cannot lock the keyboard');
+  }
+}
+function exitFullscreen() {
+  navigator.keyboard?.unlock?.();
+  if (document.fullscreenElement) document.exitFullscreen?.();
+}
+function toggleFullscreen() {
+  return document.fullscreenElement ? exitFullscreen() : enterFullscreen();
+}
+// Leaving fullscreen (by any route — F11, Esc, our button) must release the lock,
+// otherwise the browser keeps swallowing shortcuts while the page looks normal.
+addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) navigator.keyboard?.unlock?.();
+});
+$('btnFs').onclick = toggleFullscreen;
+$('btnFullscreen').onclick = toggleFullscreen;
 $('btnRetry').onclick = connect;
+
+// ── capabilities readout ────────────────────────────────────────────────────
+// The daemon publishes what this guest resolved each capability to
+// (/capabilities): session type and the backend behind capture, input, a11y,
+// clipboard and audio. That is the answer to "why is there no sound / why does
+// input not work", so it belongs on screen instead of only in the daemon log.
+//
+// Best effort and out of band: the WS stream does not carry it, it is fetched
+// once per connect, and any failure just leaves the row hidden — a missing
+// capability panel must never break the stream itself.
+async function loadCapabilities() {
+  const base = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
+  try {
+    const r = await fetch(base + 'capabilities', { cache: 'no-store' });
+    if (!r.ok) return;
+    const c = await r.json();
+    const rows = [
+      ['session', c.session],
+      ['capture', c.capture],
+      ['input', c.input],
+      ['a11y', c.a11y],
+      ['clipboard', c.clipboard],
+      ['audio', c.audio],
+    ].filter(([, v]) => v);
+    if (!rows.length) return;
+    $('caps').textContent = rows.map(([k, v]) => `${k.padEnd(9)} ${v}`).join('\n');
+    $('capRow').hidden = false;
+  } catch (e) {
+    // Older daemons have no /capabilities; nothing to show.
+  }
+}
 
 // Mode: View (no token) <-> Control (needs the control token). Switching
 // reconnects with/without the token; the daemon answers with AuthOk.
@@ -727,6 +826,9 @@ function buildRow(el, chars) {
     const d = document.createElement('div');
     d.className = 'key';
     d.dataset.txt = c;
+    // data-base is the UNSHIFTED legend; reflectShift() repaints from it so the
+    // keycap can be toggled between its two legends without losing the original.
+    d.dataset.base = c;
     d.textContent = c;
     el.appendChild(d);
   }
@@ -735,10 +837,15 @@ buildRow($('rowDigits'), '1234567890'.split(''));
 buildRow($('row1'), 'qwertyuiop'.split(''));
 buildRow($('row2'), 'asdfghjkl'.split(''));
 buildRow($('row3'), 'zxcvbnm'.split(''));
-// Symbol tab: three 10-key rows (same size as every other key).
-buildRow($('rowSym1'), ['!','@','#','$','%','^','&','*','(',')']);
-buildRow($('rowSym2'), ['-','_','=','+','[',']','{','}','\\','|']);
-buildRow($('rowSym3'), ['/','?',':',';','\'','"','~','`','<','>']);
+// Symbol tab: four 10-key rows, ordered by how often each is typed rather than by
+// ASCII. Row 1 is sentence punctuation (".", ",", "-", "'", '"', ...), row 2 the
+// brackets and quotes used for code, row 3 maths/comparison, row 4 the remainder.
+// The three-row version was only the US shift plane, which left out "." and ","
+// — the two symbols people use most.
+buildRow($('rowSym1'), ['.',',','?','!','-','\'','"',':',';','/']);
+buildRow($('rowSym2'), ['(',')','[',']','{','}','<','>','|','\\']);
+buildRow($('rowSym3'), ['+','=','*','%','&','^','~','_','$','#']);
+buildRow($('rowSym4'), ['@','`','€','£','¥','°','§','©','®','•']);
 
 // Keyboard tabs: swap the visible pane (no scrolling).
 document.querySelectorAll('#kbdTabs .tab').forEach((t) => {
@@ -830,6 +937,7 @@ function applyMode(viewOnly) {
   }
 }
 function connect() {
+  loadCapabilities();
   close();
   setState('wait');
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';

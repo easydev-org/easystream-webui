@@ -52,15 +52,39 @@
         background: var(--bar); border: 1px solid var(--bd); border-radius: 12px;
         padding: 10px 14px; backdrop-filter: blur(8px); font-size: 16px;
       }
+      /* Fullscreen sits next to the keyboard button, same shape, so the two
+         "screen modes" are adjacent instead of one being buried in the menu. */
+      #btnFullscreen {
+        position: fixed; left: 68px; z-index: 25;
+        bottom: calc(12px + env(safe-area-inset-bottom));
+        background: var(--bar); border: 1px solid var(--bd); border-radius: 12px;
+        padding: 10px 14px; backdrop-filter: blur(8px); font-size: 16px;
+      }
+      /* Capability readout: small, monospace, wraps — it is reference text, not a
+         control, so it must stay readable in a narrow panel. */
+      .caps {
+        font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--fg2, #aaa); text-align: left; white-space: pre-wrap;
+        word-break: break-word; max-width: 62vw;
+      }
       /* Keyboard: a FIXED-HEIGHT panel with TABBED groups (like a phone IME).
          Every key is the SAME size; no scrolling. */
+      /* The keyboard ALWAYS comes up from the BOTTOM, on phones and on desktop.
+       *
+       * It used to be a left-hand side drawer on wide screens, which meant the
+       * same key lived somewhere different depending on the window size and the
+       * canvas was squeezed into a narrower column while typing. A bottom sheet
+       * is where every on-screen keyboard lives, so it needs no relearning, and
+       * the picture keeps its width. */
       #kbd {
-        position: fixed; left: 0; top: 0; bottom: 0; width: var(--kbdw); z-index: 26;
+        position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: auto; z-index: 26;
+        height: var(--kbdh); max-height: var(--kbdh);
         background: var(--bar); backdrop-filter: blur(12px);
-        border-right: 1px solid var(--bd); padding: 8px;
-        padding-top: calc(8px + env(safe-area-inset-top));
+        border-top: 1px solid var(--bd);
+        border-radius: 14px 14px 0 0;
+        padding: 8px;
         padding-bottom: calc(8px + env(safe-area-inset-bottom));
-        transform: translateX(-102%); transition: transform .18s ease;
+        transform: translateY(102%); transition: transform .18s ease;
         display: flex; flex-direction: column; gap: 6px;
         overflow: hidden;                 /* no scroll: tabs swap panes */
       }
@@ -106,12 +130,14 @@
       }
       #kbd .key:active { background: var(--acc); color: #000; }
       #kbd .key.mod.on { background: var(--acc); color: #000; border-color: var(--acc); }
-      /* Bottom letters row (Shift / space / ⌫): a 10-column grid where Shift
-         and ⌫ are 2 columns and space is 6 — same HEIGHT as every key. */
+      /* Bottom letters row: Shift , . space ' ⌫ ⏎ — a 10-column grid.
+         Proportions follow a real keyboard: the function keys are wider than the
+         punctuation keys and space gets the most room, so the row reads like
+         "⇧ , . [space] ' ⌫ ⏎" instead of seven identical squares.
+           1 ⇧ 2 | 3 , 1 | 4 . 1 | 5 space 3 | 6 ' 1 | 7 ⌫ 1 | 8 ⏎ 1  (sums to 10) */
       #kbd .g10.grow { grid-template-columns: repeat(10, 1fr); }
       #kbd .g10.grow .key:nth-child(1) { grid-column: span 2; }
-      #kbd .g10.grow .key:nth-child(2) { grid-column: span 6; }
-      #kbd .g10.grow .key:nth-child(3) { grid-column: span 2; }
+      #kbd .g10.grow .key:nth-child(4) { grid-column: span 3; }
       #kbd .pane .hint { font-size: 11px; color: #999; }
       #kbd .sendrow { display: grid; grid-template-columns: 1fr; flex: 0 0 auto; height: 40px; }
       #kbd #ime { width: 100%; min-height: 40px; background: #00000055; color: #eee;
@@ -173,14 +199,14 @@
       #panel .segbtn.on { background: var(--acc); color: #000; border-color: var(--acc); }
       #panel .toggle.on { background: var(--acc); color: #000; border-color: var(--acc); }
       /* When the keyboard is open the canvas shrinks so the screen is never
-         hidden behind it (wide: drawer on the LEFT; narrow: sheet at the BOTTOM). */
+         hidden behind it. Always the BOTTOM sheet, at every width — the old
+         wide-screen variant moved it to the left and squeezed the canvas into a
+         narrow column instead. */
       body.kbd-open #screen { height: calc(100% - var(--kbdh, 46vh)); }
-      /* keep the zoom/pan controls above the keyboard sheet */
-      body.kbd-open #zoom { bottom: calc(var(--kbdh, 46vh) + 12px); }
-      body.kbd-open #kbdToggle { bottom: calc(var(--kbdh, 46vh) + 12px); }
-      @media (min-width: 641px) {
-        body.kbd-open #screen { left: var(--kbdw); width: calc(100% - var(--kbdw)); }
-      }
+      /* keep the zoom/pan controls and the two screen-mode buttons above the sheet */
+      body.kbd-open #zoom,
+      body.kbd-open #kbdToggle,
+      body.kbd-open #btnFullscreen { bottom: calc(var(--kbdh, 46vh) + 12px); }
       #toast { position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom));
         transform: translateX(-50%) translateY(20px); z-index: 60;
         background: #000000dd; color: #fff; border: 1px solid var(--bd);
@@ -196,6 +222,14 @@
       <div class="prow">
         <span class="badge wait" id="state">connecting</span>
         <span class="micro" id="stats">—</span>
+      </div>
+      <!-- What this guest can actually do, straight from the daemon's
+           /capabilities. Shown here (not in the panel buttons) because these are
+           facts about the sandbox, not settings: session type, and which backend
+           each capability resolved to. -->
+      <div class="prow" id="capRow" hidden>
+        <label>Caps</label>
+        <span class="caps" id="caps">—</span>
       </div>
       <div class="prow">
         <label>Mode</label>
@@ -222,11 +256,14 @@
       </div>
     </div>
     <button id="kbdToggle" title="keyboard">⌨</button>
+    <!-- Always-on fullscreen button. The panel one needs two taps (menu, then
+         the button) and the panel also hides while you watch; fullscreen is the
+         mode people actually live in, so it gets its own target. -->
+    <button id="btnFullscreen" title="fullscreen (locks the keyboard where supported)" aria-label="fullscreen">⛶</button>
     <div id="zoom">
       <button id="zIn" title="zoom in">＋</button>
       <button id="zOut" title="zoom out">－</button>
       <button id="zFit" title="fit" style="font-size:12px">Fit</button>
-      <button id="zOne" title="100%" style="font-size:12px">1:1</button>
       <span id="zoomLabel">100%</span>
     </div>
     <div id="kbd">
@@ -254,16 +291,33 @@
         <button class="tab" data-tab="ime">IME</button>
       </div>
       <div class="panes">
-        <!-- Letters: a phone-style QWERTY, every key the same size -->
+        <!-- Letters: a phone-style QWERTY, every key the same size.
+             Row layout follows a hardware keyboard closely enough that muscle
+             memory works: digits, then QWERTY / ASDF / ZXCV, then a Shift key on
+             the left of Z and a Backspace on the right of M, and a bottom row
+             with punctuation, space and Return.
+
+             This page used to end after the ZXCV row plus a Shift/space/Backspace
+             strip — no Return at all, and no way to type "." or "," from the
+             page you type on. Both are now on the bottom row, where a keyboard
+             puts them. -->
         <div class="pane on" data-pane="letters">
           <div class="g10" id="rowDigits"></div>
           <div class="g10" id="row1"></div>
+          <!-- 9 and 7 keys are CENTRED, as on a real keyboard: .g9 keeps the same
+               key width as the 10-key rows and centres the row, while the ZXCV row
+               gets half-key spacers on both sides so it starts where a keyboard
+               puts it instead of flush against the left edge. -->
           <div class="g9" id="row2"></div>
           <div class="g9" id="row3"></div>
           <div class="g10 grow">
             <div class="key" data-key="Shift">⇧</div>
+            <div class="key" data-txt=",">,</div>
+            <div class="key" data-txt=".">.</div>
             <div class="key" data-txt=" ">space</div>
+            <div class="key" data-txt="'">'</div>
             <div class="key" data-key="Backspace">⌫</div>
+            <div class="key" data-key="Return" title="Return">⏎</div>
           </div>
         </div>
         <!-- Edit: modifiers + editing keys, all the same size -->
@@ -316,9 +370,15 @@
         </div>
         <!-- Sym: punctuation, 10 per row, same size -->
         <div class="pane" data-pane="sym">
+          <!-- Four rows, ordered by how often each symbol is actually typed, not
+               by ASCII order: punctuation you use in a sentence comes first, then
+               brackets, then maths, then the rare ones. The previous three rows
+               were the US shift-plane only, so "." and "," — the two most common
+               symbols after the space — were missing from the symbol page. -->
           <div class="g10" id="rowSym1"></div>
           <div class="g10" id="rowSym2"></div>
           <div class="g10" id="rowSym3"></div>
+          <div class="g10" id="rowSym4"></div>
         </div>
         <!-- IME / CJK text entry -->
         <div class="pane" data-pane="ime">
