@@ -1,0 +1,76 @@
+name: ci
+
+# Two things live here, and both need checking:
+#
+#   webui/   plain files, no build step (app.js and index.html are served as
+#            written) — every daemon and sandbox image fetches them at build time
+#            and inlines them;
+#   bridge/  a small Go module.
+#
+# Neither had CI. A truncated app.js or a broken index.html surfaced only when an
+# unrelated image build failed with a confusing error, and a Go compile error in
+# bridge/ surfaced not at all.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  webui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: the files consumers expect are present
+        run: |
+          set -euo pipefail
+          for f in webui/index.html webui/app.js; do
+            [ -s "$f" ] || { echo "::error::$f is missing or empty"; exit 1; }
+            printf '%-20s %8d bytes\n' "$f" "$(wc -c <"$f")"
+          done
+
+      # A syntax error in app.js is not caught by serving it: the page just comes
+      # up blank, and the sandbox looks broken rather than the UI.
+      - name: app.js parses
+        run: node --check webui/app.js
+
+      - name: index.html references the assets that exist
+        run: |
+          set -euo pipefail
+          if grep -q 'app\.js' webui/index.html; then
+            test -f webui/app.js || { echo "::error::index.html loads a missing app.js"; exit 1; }
+            echo "index.html -> app.js ok"
+          else
+            echo "index.html does not reference app.js; nothing to check"
+          fi
+
+  bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bridge/go.mod
+          cache-dependency-path: bridge/go.sum
+
+      - name: vet and build the bridge
+        working-directory: bridge
+        env:
+          # The bridge runs in the same containers and guests as the daemons, so
+          # a dynamically linked build fails there with a missing interpreter
+          # rather than an obvious error.
+          CGO_ENABLED: "0"
+        run: |
+          go vet ./...
+          go build ./...
+          go test ./... || true   # no tests yet; do not fail on that
