@@ -238,6 +238,21 @@
           <button id="modeControl" class="segbtn">Control</button>
         </div>
       </div>
+      <!-- Quality: three presets (EST.md defines what each means). Hidden until
+           the daemon's Hello carries a video block, and disabled in view mode
+           because reconfiguring is a control-plane operation. -->
+      <div class="prow" id="qualityRow" hidden>
+        <label>Quality</label>
+        <div class="seg">
+          <button class="segbtn" data-q="0">标清</button>
+          <button class="segbtn" data-q="1">高清</button>
+          <button class="segbtn" data-q="2">原画</button>
+        </div>
+      </div>
+      <div class="prow" id="encRow" hidden>
+        <label>Encoder</label>
+        <span class="micro" id="encName">—</span>
+      </div>
       <div class="prow">
         <label>Audio</label>
         <span>

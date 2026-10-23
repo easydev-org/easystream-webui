@@ -2,8 +2,19 @@
 // touch input, and a floating virtual keyboard. est-only (no a11y queries).
 
 const T = { HELLO: 0x01, VIDEO: 0x02, AUTH_OK: 0x04, AUDIO: 0x05,
+  CONFIG_SET: 0x08, CONFIG_ACK: 0x09,
   MOVE: 0x10, BUTTON: 0x11, SCROLL: 0x12, KEY: 0x13, TEXT: 0x14,
   AUDIO_REQ: 0x06, AUDIO_OFF: 0x07, CLIP_GET: 0x30, CLIP_DATA: 0x31, CLIP_SET: 0x32 };
+
+// Quality presets. The wire protocol carries explicit numbers, never a preset
+// name (see EST.md): these are expanded locally by qualityBody() so that every
+// platform's daemon receives the same request for the same label.
+//   longest side 1280 / 1920 / unchanged, 30 fps, 3 / 8 / 20 Mbps.
+const QUALITY = [
+  { id: 0, label: '标清', side: 1280, fps: 30, bitrate: 3_000_000 },
+  { id: 1, label: '高清', side: 1920, fps: 30, bitrate: 8_000_000 },
+  { id: 2, label: '原画', side: 0,    fps: 30, bitrate: 20_000_000 },
+];
 
 const $ = (id) => document.getElementById(id);
 const cv = $('screen');
@@ -14,7 +25,10 @@ const panel = $('panel');
 // macOS encoder emits Level 4.0 = 0x28; a Level-3.1 string made the browser
 // reject 1920x1080 with EncodingError). Level 5.1 is a safe superset.
 const S = { ws: null, dec: null, codec: 'avc1.42E033', w: 0, h: 0, gotKey: false,
-  frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0, viewOnly: false, adec: null, actx: null, again: null, wantControl: !!accessToken(), wantAudio: true, openKbdAfterControl: false, muted: false, anext: 0, aDecoded: 0 };
+  frames: 0, fps: 0, t0: performance.now(), userScale: 1, panX: 0, panY: 0, viewOnly: false, adec: null, actx: null, again: null, wantControl: !!accessToken(), wantAudio: true, openKbdAfterControl: false, muted: false, anext: 0, aDecoded: 0,
+  // video configuration, from Hello's video block (offsets 15+). capW/capH is
+  // the size the capture source produces; w/h is what the encoder is emitting.
+  enc: 0, vflags: 0, vbitrate: 0, capW: 0, capH: 0, quality: -1, wantQuality: -1 };
 
 // token comes from the URL (?token=… or #token=…): a viewer link can carry it.
 function accessToken() {
@@ -81,6 +95,78 @@ function sendKey(name, ch, down) {
   send(frame(T.KEY, b));
 }
 function sendText(s) { send(frame(T.TEXT, new TextEncoder().encode(s))); }
+
+// ── quality ─────────────────────────────────────────────────────────────────
+// qualityBody expands a preset into an explicit ConfigSet. The protocol never
+// carries a preset name, so every platform receives identical numbers.
+//
+// Geometry is sent as the TARGET encoder size, not a scale factor: the daemon
+// does not know the client's idea of "longest side", and sending the resolved
+// width/height keeps the two ends in agreement about what 高清 means.
+function qualityBody(preset) {
+  const q = QUALITY[preset];
+  if (!q) return null;
+  let w = 0, h = 0;
+  if (q.side && S.capW && S.capH) {
+    const long = Math.max(S.capW, S.capH);
+    const k = Math.min(1, q.side / long);           // never upscale
+    // H.264 4:2:0 needs even dimensions.
+    w = Math.max(2, Math.round(S.capW * k / 2) * 2);
+    h = Math.max(2, Math.round(S.capH * k / 2) * 2);
+  }
+  // Layout per EST.md 0x08, 14 bytes in this order:
+  //   [0]    hasWidth      [1..2]  u16 width
+  //   [3]    hasHeight     [4..5]  u16 height
+  //   [6]    hasFps        [7]     u8  fps
+  //   [8]    hasBitrate    [9..12] u32 bitrate
+  //   [13]   hasEncoder
+  // An earlier version sized this at 12 bytes and wrote the u32 at offset 9,
+  // which runs to byte 12 - one past the end - and threw "Offset is outside the
+  // bounds of the DataView" the moment a preset was clicked.
+  const b = new Uint8Array(14);
+  b[0] = w ? 1 : 0; if (w) { b[1] = w >> 8; b[2] = w & 255; }
+  b[3] = h ? 1 : 0; if (h) { b[4] = h >> 8; b[5] = h & 255; }
+  b[6] = 1; b[7] = q.fps;
+  b[8] = 1;
+  new DataView(b.buffer).setUint32(9, q.bitrate, false);
+  b[13] = 0;   // hasEncoder = 0: let the daemon keep its choice
+  return b;
+}
+
+function setQuality(preset) {
+  if (S.viewOnly) { setState('err', 'view only'); return; }
+  if (!S.hasVideoCfg || !(S.vflags & 1)) return;   // daemon cannot reconfigure
+  const body = qualityBody(preset);
+  if (!body) return;
+  S.wantQuality = preset;
+  send(frame(T.CONFIG_SET, body));
+}
+
+// syncQualityUI reflects what the daemon last told us, not what we asked for:
+// a refused ConfigSet must not leave the UI claiming the new preset.
+function syncQualityUI() {
+  const row = $('qualityRow');
+  if (!row) return;
+  const can = S.hasVideoCfg && (S.vflags & 1) && !S.viewOnly;
+  row.hidden = !S.hasVideoCfg;
+  const er = $('encRow'); if (er) er.hidden = !S.hasVideoCfg;
+  for (const b of row.querySelectorAll('button')) {
+    b.disabled = !can;
+    b.classList.toggle('on', Number(b.dataset.q) === S.quality);
+  }
+  const enc = $('encName');
+  if (enc) enc.textContent = encoderName(S.enc) + (S.vbitrate ? ' · ' + Math.round(S.vbitrate / 1e6) + ' Mbps' : '');
+}
+
+// Wire the preset buttons once: they only ASK the daemon, they never assume the
+// change took effect (syncQualityUI reflects the daemon's next Hello).
+for (const b of document.querySelectorAll('#qualityRow button')) {
+  b.addEventListener('click', () => setQuality(Number(b.dataset.q)));
+}
+
+function encoderName(e) {
+  return ({ 1: 'x264', 2: 'VAAPI', 3: 'MediaFoundation', 4: 'VideoToolbox', 5: 'MediaCodec' })[e] || '—';
+}
 
 // ── clipboard ───────────────────────────────────────────────────────────────
 // The browser clipboard is the LOCAL one (navigator.clipboard); the guest's is
@@ -205,13 +291,49 @@ function onBytes(chunk) {
       const len = new DataView(body.buffer, body.byteOffset).getUint32(4, false);
       const txt = new TextDecoder().decode(body.slice(8, 8 + len));
       onClipData(txt);
+    } else if (type === T.CONFIG_ACK) {
+      // ok=0 means the daemon refused (unsupported encoder, geometry its capture
+      // source cannot produce, ...). Drop the pending choice so the UI keeps
+      // showing the preset that is actually running.
+      if (body[0] === 1) {
+        S.quality = S.wantQuality;
+      } else {
+        const msg = body.length > 2 ? new TextDecoder().decode(body.slice(2, 2 + body[1])) : 'refused';
+        S.wantQuality = S.quality;
+        setState('err', 'quality: ' + msg);
+      }
+      syncQualityUI();
     } else if (type === 0x04) { // AuthOk: body[0] = 0 view / 1 control / 0xFF fail
       if (body[0] === 0xFF) { setState('err', 'auth failed'); return; }
       applyMode(body[0] === 0);
     } else if (type === T.HELLO) {
       if (body[1] === 1) S.codec = 'avc1.42E033';
+      const prevW = S.w, prevH = S.h, prevEnc = S.enc, prevBitrate = S.vbitrate;
       S.w = (body[2] << 8) | body[3]; S.h = (body[4] << 8) | body[5];
       off.width = S.w || 1; off.height = S.h || 1;
+      // Video block, appended at offset 15 by servers that support run-time
+      // quality changes. Absent means the daemon is older than this client: the
+      // geometry above is then the whole truth and the quality row stays hidden.
+      if (body.length >= 23 && body[15] === 1) {
+        S.enc = body[16];
+        S.vflags = body[17];
+        S.vbitrate = ((body[18] << 24) | (body[19] << 16) | (body[20] << 8) | body[21]) >>> 0;
+        S.hasVideoCfg = true;
+        // The daemon reports the size it is ENCODING; without a separate capture
+        // size we treat that as the native one, which keeps 原画 honest.
+        if (!S.capW) { S.capW = S.w; S.capH = S.h; }
+        syncQualityUI();
+      }
+      // A reconfigure (we asked, or the daemon changed something) arrives as a
+      // second Hello. VideoDecoder.configure() is bound to a geometry, and a
+      // decoder left on the old size throws on the new frames, so it is rebuilt
+      // here. gotKey goes back to false because the daemon forces an IDR for us:
+      // decoding must not resume until that keyframe arrives.
+      if (prevW && (prevW !== S.w || prevH !== S.h)) {
+        if (S.dec) { try { S.dec.close(); } catch {} S.dec = null; }
+        S.gotKey = false;
+        startDecoder();
+      }
       // Audio block (v1 extension): present@7, codec@8, rate@9..13, ch@13, ms@14.
       if (body.length >= 15 && body[7] === 1 && S.wantAudio) {
         S.aRate = ((body[9] << 24) | (body[10] << 16) | (body[11] << 8) | body[12]) >>> 0;
@@ -928,6 +1050,9 @@ function applyMode(viewOnly) {
   const kb = $('btnKbd'), ime = $('ime');
   if (kb) kb.style.display = viewOnly ? 'none' : '';
   if (ime) ime.disabled = viewOnly;
+  // Quality is a control-plane operation: switching to view must disable the
+  // preset buttons immediately, not only when the next Hello arrives.
+  syncQualityUI();
   if (viewOnly) { const k = $('kbd'); if (k) k.classList.remove('show'); }
   // The user asked for the keyboard while in View mode: open it now that we
   // are in Control.
