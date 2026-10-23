@@ -319,6 +319,17 @@ function onBytes(chunk) {
         S.vflags = body[17];
         S.vbitrate = ((body[18] << 24) | (body[19] << 16) | (body[20] << 8) | body[21]) >>> 0;
         S.hasVideoCfg = true;
+        // bit2: offsets 2..6 are the INPUT size (device pixels), not the decoded
+        // size. Android needs this - its input path takes device pixels, and a
+        // downscaled stream would otherwise put every tap in the wrong place.
+        if (S.vflags & 4) {
+          // The encoded size follows at offset 23.
+          if (body.length >= 27) {
+            S.inW = S.w; S.inH = S.h;
+            S.w = (body[23] << 8) | body[24];
+            S.h = (body[25] << 8) | body[26];
+          }
+        }
         // The daemon reports the size it is ENCODING; without a separate capture
         // size we treat that as the native one, which keeps 原画 honest.
         if (!S.capW) { S.capW = S.w; S.capH = S.h; }
@@ -510,12 +521,19 @@ $('zOut').onclick = () => zoomBy(0.8);
 $('zFit').onclick = fitView;
 
 // ── input ───────────────────────────────────────────────────────────────────
+// toSource maps a view coordinate onto the INPUT coordinate space.
+//
+// That is S.w/S.h (offsets 2-6) on every platform whose backend takes stream
+// coordinates. Android sets flags bit2 because its input path takes DEVICE
+// pixels: there the decoded size and the input size differ, and the rounding
+// has to happen in the input space or every tap lands at the wrong point.
 function toSource(clientX, clientY) {
   const el = cv.getBoundingClientRect();
   const r = drawRect();
-  const x = Math.round(((clientX - el.left - r.left) / r.width) * (S.w || 1));
-  const y = Math.round(((clientY - el.top - r.top) / r.height) * (S.h || 1));
-  return [Math.max(0, Math.min(S.w || 1e9, x)), Math.max(0, Math.min(S.h || 1e9, y))];
+  const iw = S.inW || S.w || 1, ih = S.inH || S.h || 1;
+  const x = Math.round(((clientX - el.left - r.left) / r.width) * iw);
+  const y = Math.round(((clientY - el.top - r.top) / r.height) * ih);
+  return [Math.max(0, Math.min(iw, x)), Math.max(0, Math.min(ih, y))];
 }
 const cur = document.createElement('div');
 cur.style.cssText = 'position:fixed;z-index:5;pointer-events:none;width:16px;height:16px;display:none';
