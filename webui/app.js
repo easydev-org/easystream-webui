@@ -2,7 +2,8 @@
 // touch input, and a floating virtual keyboard. est-only (no a11y queries).
 
 const T = { HELLO: 0x01, VIDEO: 0x02, AUTH_OK: 0x04, AUDIO: 0x05,
-  CONFIG_SET: 0x08, CONFIG_ACK: 0x09,
+  CONFIG_SET: 0x08,
+  KEYFRAME_REQ: 0x0A, CONFIG_ACK: 0x09,
   MOVE: 0x10, BUTTON: 0x11, SCROLL: 0x12, KEY: 0x13, TEXT: 0x14,
   AUDIO_REQ: 0x06, AUDIO_OFF: 0x07, CLIP_GET: 0x30, CLIP_DATA: 0x31, CLIP_SET: 0x32 };
 
@@ -71,6 +72,19 @@ function flushMove() {
   const b = new Uint8Array(4); const d = new DataView(b.buffer);
   d.setUint16(0, m[0], false); d.setUint16(2, m[1], false); send(frame(T.MOVE, b));
 }
+// requestKeyframe asks the daemon for an IDR (EST.md 0x0A). No reply: the frame
+// itself is the answer, and an IDR we asked for is indistinguishable from one we
+// did not.
+let _lastPli = 0;
+function requestKeyframe() {
+  const now = performance.now();
+  // Rate-limit locally as well: the daemon coalesces, but there is no point
+  // spending a frame on every failed decode within the same second.
+  if (now - _lastPli < 500) return;
+  _lastPli = now;
+  send(frame(T.KEYFRAME_REQ, new Uint8Array(0)));
+}
+
 function sendMove(x, y) {
   _pendingMove = [x, y];
   if (_moveRaf) return;
@@ -144,6 +158,95 @@ function setQuality(preset) {
 
 // syncQualityUI reflects what the daemon last told us, not what we asked for:
 // a refused ConfigSet must not leave the UI claiming the new preset.
+// ── adaptive bitrate ────────────────────────────────────────────────────────
+//
+// The daemon cannot see the path to this browser, so any bandwidth estimate on
+// the server side would be a guess. We are the only party that knows how fast
+// frames actually arrive, which is why adaptation lives here.
+//
+// The signal is the decoded frame rate against the rate Hello promised. A screen
+// stream is change-driven, so a STATIC desktop legitimately delivers far fewer
+// frames than the Hello rate - that is not congestion, and adapting on it would
+// ratchet the bitrate down while the user reads a page. So a low frame count
+// only counts as congestion when frames were being dropped, which we detect by
+// comparing against the last second that was busy.
+const ABR = {
+  enabled: true,
+  // The bitrate the USER asked for: adaptation never climbs above it.
+  ceiling: 0,
+  // Consecutive busy seconds before we act, so one hiccup does not move us.
+  downStreak: 0,
+  upStreak: 0,
+  // What the USER asked for; adaptation never climbs above it.
+  userCeiling: 0,
+  // A screen stream at rest is not evidence of congestion.
+  busy: 0,
+};
+
+function adaptBitrate(fps) {
+  if (!ABR.enabled || !S.hasVideoCfg || S.viewOnly) return;
+  if (!S.vbitrate) return;
+  const target = S.hellofps || 0;
+  if (!target) return;
+
+  // "busy" means we were seeing a healthy share of the promised rate. Only a
+  // busy second tells us anything: the daemon skips unchanged frames, so an idle
+  // desktop delivers almost none and that is perfect behaviour.
+  const healthy = fps >= target * 0.6;
+  if (healthy) {
+    ABR.busy++;
+    ABR.downStreak = 0;
+  } else if (ABR.busy > 0) {
+    // Worth acting on only while the screen was busy right before: that is a
+    // real stall, not a page that stopped changing.
+    ABR.busy = Math.max(0, ABR.busy - 1);
+    ABR.downStreak++;
+  } else {
+    ABR.downStreak = 0;
+    return;
+  }
+
+  // Two consecutive stalls: halve, but never below the floor the daemon accepts.
+  if (ABR.downStreak >= 2) {
+    const next = Math.max(300000, Math.floor(S.vbitrate * 0.6));
+    if (next < S.vbitrate * 0.9) {
+      ABR.upStreak = 0;
+      ABR.downStreak = 0;
+      ABR.busy = 0;
+      setBitrate(next);
+      return;
+    }
+    ABR.downStreak = 0;
+  }
+
+  // Six healthy seconds with headroom: step back up toward the user's ceiling,
+  // never past it.
+  if (healthy) {
+    ABR.upStreak++;
+    if (ABR.upStreak >= 6 && S.vbitrate < ABR.userCeiling) {
+      const next = Math.min(ABR.userCeiling, Math.floor(S.vbitrate * 1.5));
+      if (next > S.vbitrate * 1.1) {
+        ABR.upStreak = 0;
+        setBitrate(next);
+      }
+    }
+  } else {
+    ABR.upStreak = 0;
+  }
+}
+
+// setBitrate sends a bitrate-only ConfigSet and records it as the user's intent
+// so a later preset click is measured against the new value, not the old one.
+function setBitrate(bps) {
+  // Same 14-byte layout as qualityBody (EST.md 0x08); only hasBitrate is set.
+  //   [0] hasWidth  [1..2] width   [3] hasHeight [4..5] height
+  //   [6] hasFps    [7] fps        [8] hasBitrate [9..12] u32   [13] hasEncoder
+  const b = new Uint8Array(14);
+  b[0] = 0; b[3] = 0; b[6] = 0; b[8] = 1; b[13] = 0;
+  new DataView(b.buffer).setUint32(9, bps >>> 0, false);
+  send(frame(T.CONFIG_SET, b));
+}
+
 function syncQualityUI() {
   const row = $('qualityRow');
   if (!row) return;
@@ -333,6 +436,14 @@ function onBytes(chunk) {
         // The daemon reports the size it is ENCODING; without a separate capture
         // size we treat that as the native one, which keeps 原画 honest.
         if (!S.capW) { S.capW = S.w; S.capH = S.h; }
+        // The frame rate the daemon promised, for the adaptation to compare
+        // against. Hello is authoritative, so a refused step is visible here as
+        // the old value coming back.
+        S.hellofps = body[6] || 30;
+        // The user's chosen bitrate is the ceiling adaptation may climb back to.
+        // A preset click sets it; an adaptation step never raises it.
+        if (!ABR.userCeiling) ABR.userCeiling = S.vbitrate;
+        if (S.wantQuality !== S.quality) ABR.userCeiling = S.vbitrate;
         syncQualityUI();
       }
       // A reconfigure (we asked, or the daemon changed something) arrives as a
@@ -374,9 +485,18 @@ function startDecoder() {
       if (now - S.t0 >= 1000) {
         S.fps = S.frames; S.frames = 0; S.t0 = now;
         $('stats').textContent = `${S.w}×${S.h} · ${S.fps} fps`;
+        adaptBitrate(S.fps);
       }
     },
-    error: (e) => setState('err', String(e)),
+    // A decode error means we lost a frame and cannot recover until the next
+    // IDR, which the daemon only sends every keyint frames (2 s). Asking for one
+    // turns a two-second smear into a single frame. Requests are coalesced by the
+    // daemon, so asking on every error is safe - and it is what a recovering
+    // decoder does naturally.
+    error: (e) => {
+      requestKeyframe();
+      setState('err', String(e));
+    },
   });
   S.dec.configure({ codec: S.codec, optimizeForLatency: true });
   setState('live');
